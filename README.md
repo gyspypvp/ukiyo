@@ -17,12 +17,28 @@ Also included: the modular `RoundManager` + `GameMode` contract, `SurgeMode`, a 
 
 ## Quick start
 
-1. Install [Rojo](https://rojo.space) 7.4+ (the project uses `.luau` files).
-2. `rojo serve` and connect from the Rojo Studio plugin, or `rojo build -o ClashKick.rbxl`.
-3. In your place, tag BaseParts with CollectionService tags:
+Install [Rojo](https://rojo.space) 7.4+ on the computer that runs Roblox Studio (the project uses `.luau` files). `rojo serve` must run on that same machine, because the Studio plugin connects to `localhost:34872`.
+
+### Option A: open a ready-to-play test place
+
+```bash
+rojo build dev.project.json -o ClashKick.rbxl
+```
+
+Open `ClashKick.rbxl` in Studio, then Test → *Clients and Servers* → 2+ players → Start.
+
+`dev.project.json` is the game plus a minimal test map: a lobby with a SpawnLocation and an open-edged arena 220 studs away with 10 tagged spawn pads. Falling off the arena is a KO.
+
+### Option B: live-sync into your own place
+
+1. `rojo plugin install` (once) installs the matching Studio plugin.
+2. In the repo folder: `rojo serve`
+3. In Studio, open your place → Plugins → Rojo → **Connect**. Code edits now sync live.
+4. Tag BaseParts with CollectionService tags (Studio's Tag Editor works):
    - `CK_ArenaSpawn` on the arena spawn pads
    - `CK_LobbySpawn` on the lobby spawn pads
-4. Studio → Test → *Clients and Servers* → 2+ players → Start.
+
+`rojo serve dev.project.json` also works; it syncs the test map into an empty Baseplate.
 
 Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. Set `Config.Monetization.CrateKeyProductId` to your Developer Product id.
 

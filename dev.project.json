@@ -1,0 +1,415 @@
+{
+  "name": "ClashKickDev",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+    "Workspace": {
+      "$className": "Workspace",
+      "ClashKickDevMap": {
+        "$className": "Folder",
+        "Lobby": {
+          "$className": "Model",
+          "LobbyFloor": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [0, 0, 0],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [64, 2, 64],
+              "Color": [0.35, 0.55, 0.9],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth"
+            }
+          },
+          "SpawnLocation": {
+            "$className": "SpawnLocation",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [0, 1.5, 0],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [8, 1, 8],
+              "Color": [0.95, 0.95, 0.95],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "Neutral": true,
+              "Duration": 0,
+              "Tags": ["CK_LobbySpawn"]
+            }
+          },
+          "LobbyPad1": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [18, 1.1, 18],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [0.4, 0.8, 1.0],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_LobbySpawn"]
+            }
+          },
+          "LobbyPad2": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-18, 1.1, 18],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [0.4, 0.8, 1.0],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_LobbySpawn"]
+            }
+          },
+          "LobbyPad3": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [18, 1.1, -18],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [0.4, 0.8, 1.0],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_LobbySpawn"]
+            }
+          },
+          "LobbyPad4": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-18, 1.1, -18],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [0.4, 0.8, 1.0],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_LobbySpawn"]
+            }
+          }
+        },
+        "Arena": {
+          "$className": "Model",
+          "ArenaFloor": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [0, 0, 220],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [150, 2, 150],
+              "Color": [0.2, 0.22, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth"
+            }
+          },
+          "CenterRing": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [0, 1.05, 220],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [30, 0.1, 30],
+              "Color": [0.9, 0.35, 0.2],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false
+            }
+          },
+          "ArenaPad01": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [50.0, 1.1, 220.0],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad02": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [40.45, 1.1, 249.39],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad03": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [15.45, 1.1, 267.55],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad04": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-15.45, 1.1, 267.55],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad05": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-40.45, 1.1, 249.39],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad06": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-50.0, 1.1, 220.0],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad07": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-40.45, 1.1, 190.61],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad08": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [-15.45, 1.1, 172.45],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad09": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [15.45, 1.1, 172.45],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          },
+          "ArenaPad10": {
+            "$className": "Part",
+            "$properties": {
+              "Anchored": true,
+              "CFrame": {
+                "CFrame": {
+                  "position": [40.45, 1.1, 190.61],
+                  "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                }
+              },
+              "Size": [4, 0.2, 4],
+              "Color": [1.0, 0.3, 0.3],
+              "Material": "SmoothPlastic",
+              "TopSurface": "Smooth",
+              "BottomSurface": "Smooth",
+              "CanCollide": false,
+              "CanQuery": false,
+              "CanTouch": false,
+              "Transparency": 0.6,
+              "Tags": ["CK_ArenaSpawn"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

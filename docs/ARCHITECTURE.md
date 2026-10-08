@@ -116,7 +116,7 @@ Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDue
 
 ## Map setup
 
-Tag parts with CollectionService tags (Studio's Tag Editor works):
+`dev.project.json` builds a throwaway test map (lobby + arena + tagged pads) for quick playtests. For a real map, tag parts with CollectionService tags (Studio's Tag Editor works):
 
 - `CK_ArenaSpawn`: BaseParts in the arena (one per player is ideal; they are reused if there are fewer)
 - `CK_LobbySpawn`: BaseParts in the lobby
