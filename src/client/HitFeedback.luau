@@ -445,13 +445,21 @@ function HitFeedback.init(playerGui: PlayerGui)
 	flashFrame.BackgroundTransparency = 1
 	flashFrame.Parent = gui
 
-	-- Strike pips: above the action row on keyboard/gamepad, bottom-centre on touch
-	-- (the touch buttons sit bottom-right, the thumbstick bottom-left).
+	-- Strike pips: centred above the action row on keyboard/gamepad. On touch the
+	-- bottom of a phone is full (thumbstick left, the button cluster reaching past
+	-- the centre on the right), so a compact pips-only panel sits top-left, under
+	-- Roblox's top bar and clear of the hit card even on the narrowest phones.
 	local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 	local strikes = UiTheme.panel(gui, "Strikes", UDim.new(0.5, 0))
-	strikes.AnchorPoint = Vector2.new(0.5, 1)
-	strikes.Position = if touchOnly then UDim2.new(0.5, 0, 1, -14) else UDim2.new(0.5, 0, 1, -128)
-	strikes.Size = UDim2.fromOffset(196, 28)
+	if touchOnly then
+		strikes.AnchorPoint = Vector2.new(0, 0)
+		strikes.Position = UDim2.fromOffset(12, 64)
+		strikes.Size = UDim2.fromOffset(88, 28)
+	else
+		strikes.AnchorPoint = Vector2.new(0.5, 1)
+		strikes.Position = UDim2.new(0.5, 0, 1, -128)
+		strikes.Size = UDim2.fromOffset(196, 28)
+	end
 	strikes.Visible = false
 	local strikePips = buildPips(strikes, PIP_SIZE, PIP_GAP)
 	strikePips.frame.AnchorPoint = Vector2.new(0, 0.5)
@@ -461,6 +469,7 @@ function HitFeedback.init(playerGui: PlayerGui)
 	strikeLabel.Position = UDim2.new(1, -12, 0.5, 0)
 	strikeLabel.Size = UDim2.fromOffset(96, 16)
 	strikeLabel.TextXAlignment = Enum.TextXAlignment.Right
+	strikeLabel.Visible = not touchOnly
 
 	-- Hit card: who, which strike, why. A holder carries the screen-size scale so
 	-- the card's own pop-in tween can animate its scale independently.
@@ -484,7 +493,8 @@ function HitFeedback.init(playerGui: PlayerGui)
 				holder.Position = UDim2.new(0.5, 0, 0, cardTop)
 			end
 			-- Shrink to fit short or narrow screens, but never below 70% (15 px text -> 10.5 px).
-			-- At 360 px tall the card spans 6-111 px, far from the touch strike pips (H-42 to H-14).
+			-- The card is centred and at most 460 px wide, so on a 568 px phone its left edge
+			-- is at 120 px, clear of the touch strike pips (x 12-100, y 64-92).
 			fitScale.Scale = math.clamp(math.min(viewport.Y / 450, viewport.X * 0.92 / CARD_WIDTH), 0.7, 1)
 		end
 	end

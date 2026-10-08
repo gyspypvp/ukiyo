@@ -115,6 +115,7 @@ type Fighter = {
 	dashReadyAt: number,
 	ultCharge: number, -- 0..1, ULTIMATE ready at 1
 	ultPublished: number, -- last ultCharge written to the attribute (throttles replication)
+	parryCharge: number, -- meter earned from parries this round (capped by ULT.MaxParryChargePerRound)
 	ultimate: UltimateState?, -- the ULTIMATE this fighter is performing
 
 	-- Kicks
@@ -176,6 +177,8 @@ type UltimateState = {
 	diveAt: number,
 	apex: Vector3,
 	direction: Vector3,
+	heading: Vector3, -- flat direction of the leap (keeps the body's facing through a steep dive)
+	apexHoldUntil: number, -- the leap may hang at its apex until here, waiting for a stunned target
 	impactPoint: Vector3, -- locked at the top of the leap; the dive flies straight at it
 	impactAt: number,
 	speed: number, -- dive speed (studs/s), for the hit card
@@ -251,8 +254,10 @@ end
 
 -- Orientation that points the FEET along `direction` (a flying dropkick).
 -- lookAt aims -Z along the direction; rotating +90° about X turns -Y (feet) onto it.
-local function feetFirst(direction: Vector3): CFrame
-	local up = if math.abs(direction.Y) > 0.98 then Vector3.zAxis else Vector3.yAxis
+-- `facing` (optional, horizontal) picks which way the chest turns for a near-vertical
+-- direction, e.g. an ULTIMATE diving almost straight down keeps its leap heading.
+local function feetFirst(direction: Vector3, facing: Vector3?): CFrame
+	local up = if math.abs(direction.Y) > 0.98 then (facing or Vector3.zAxis) else Vector3.yAxis
 	return CFrame.lookAt(Vector3.zero, direction, up) * CFrame.Angles(math.pi / 2, 0, 0)
 end
 
@@ -666,6 +671,12 @@ local function blastBack(fighter: Fighter, origin: Vector3, axis: Vector3, gap: 
 	fighter.root.CFrame = CFrame.new(destination) * fighter.root.CFrame.Rotation
 end
 
+-- Is there ground somewhere below `position` (not the void past an arena edge)?
+local GROUND_PROBE = 50
+local function hasGround(position: Vector3): boolean
+	return Workspace:Raycast(position, Vector3.new(0, -GROUND_PROBE, 0), excludeFighters()) ~= nil
+end
+
 -- Flights ----------------------------------------------------------------------------
 
 -- Forward declaration: startFlight (a parry made mid-flight) needs finishFlight, defined below it.
@@ -819,10 +830,14 @@ local function setCharge(fighter: Fighter, value: number)
 	end
 end
 
-local function addCharge(fighter: Fighter, amount: number)
-	if fighter.ultimate == nil and fighter.ultCharge < 1 then
-		setCharge(fighter, fighter.ultCharge + amount)
+-- Returns true if it charged. Only fighters the mode lets attack charge at all (a
+-- Juggernaut runner, who can never fire an ULTIMATE, doesn't), and not mid-ULTIMATE.
+local function addCharge(fighter: Fighter, amount: number): boolean
+	if fighter.ultimate ~= nil or fighter.ultCharge >= 1 or not rules.canLaunch(fighter.player) then
+		return false
 	end
+	setCharge(fighter, fighter.ultCharge + amount)
+	return true
 end
 
 -- Drop an ULTIMATE from the registries (no broadcast, no physics change).
@@ -879,9 +894,15 @@ end
 	  * Any other strike sends the victim tumbling along the kick, and the mode
 	    hears about it through Struck.
 ]]
-local function afterStrike(attacker: Fighter, target: Fighter, direction: Vector3, exploded: boolean)
+local function afterStrike(
+	attacker: Fighter,
+	target: Fighter,
+	direction: Vector3,
+	exploded: boolean,
+	facing: Vector3? -- how the attacker stands back up (default: its own heading)
+)
 	if not exploded then
-		release(attacker)
+		release(attacker, facing)
 		tumble(target, direction)
 		struck:Fire(target.player, attacker.player, target.strikes)
 		return
@@ -890,7 +911,17 @@ local function afterStrike(attacker: Fighter, target: Fighter, direction: Vector
 	local look = attacker.root.CFrame.LookVector
 	local through = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.new(look.X, 0, look.Z)
 	if through.Magnitude > 1e-3 then
-		blastBack(attacker, target.root.Position, through.Unit, STRIKES.FinisherPushBack)
+		through = through.Unit
+		-- Carry through only as far as there is ground to land on: near an open edge
+		-- a blind push would drop the kicker who just won the exchange into the void.
+		local origin = target.root.Position
+		local distance = STRIKES.FinisherPushBack
+		while distance > 0 and not hasGround(origin + through * distance) do
+			distance -= 1.5
+		end
+		if distance > 0 then
+			blastBack(attacker, origin, through, distance)
+		end
 	end
 	release(attacker, through)
 	defeat(target, attacker.player, "Kick")
@@ -943,7 +974,10 @@ local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighte
 	defender.duelUntil = t + DUEL.SpamWindow
 	attacker.lastHitBy = defender.player -- if the blast knocks them off the arena, the defender gets the credit
 	attacker.lastHitAt = t
-	addCharge(defender, ULT.ChargePerParry)
+	local parryGain = math.min(ULT.ChargePerParry, ULT.MaxParryChargePerRound - defender.parryCharge)
+	if parryGain > 0 and addCharge(defender, parryGain) then
+		defender.parryCharge += parryGain
+	end
 	stun(attacker, PARRY.StunTime, -axis)
 	blastBack(attacker, defender.root.Position, axis, gap)
 
@@ -1161,6 +1195,8 @@ local function startUltimate(attacker: Fighter, target: Fighter, t: number)
 		diveAt = t + ULT.LeapTime,
 		apex = apex,
 		direction = heading,
+		heading = heading,
+		apexHoldUntil = t + ULT.LeapTime + ULT.MaxApexHold,
 		impactPoint = target.root.Position,
 		impactAt = t + ULT.LeapTime + ULT.DiveTime,
 		speed = 0,
@@ -1196,18 +1232,27 @@ local function resolveUltimate(ult: UltimateState)
 	local inZone = isAlive(target)
 		and Vector3.new(offset.X, 0, offset.Z).Magnitude <= ULT.Radius
 		and math.abs(offset.Y) <= ULT.Radius
+	-- A dive that was clamped against a wall or roof doesn't strike through it.
+	if inZone and Workspace:Raycast(ult.impactPoint, offset, excludeFighters()) then
+		inZone = false
+	end
 	if not inZone then
 		attacker.kickReadyAt += ULT.MissRecovery -- whiffed a finisher: an opening for the dodger
 		attacker.player:SetAttribute(ATTR.KickReadyAt, attacker.kickReadyAt)
 		fireUltimate(ult, "Miss")
-		release(attacker)
+		release(attacker, ult.heading)
 		return
 	end
 
+	-- Land just short of the victim, like a kick's clash frame, not inside their body.
+	local flat = Vector3.new(ult.direction.X, 0, ult.direction.Z)
+	local back = if flat.Magnitude > 1e-3 then flat.Unit else ult.heading
+	attacker.root.CFrame = CFrame.new(target.root.Position - back * KICK.ImpactRadius * 0.8)
+		* attacker.root.CFrame.Rotation
 	interrupt(target)
 	local exploded = addStrikes(attacker, target, ULT.Strikes)
 	broadcastUltimateHit(ult, exploded)
-	afterStrike(attacker, target, ult.direction, exploded)
+	afterStrike(attacker, target, ult.direction, exploded, ult.heading)
 end
 
 -- One Heartbeat of one ULTIMATE.
@@ -1234,15 +1279,30 @@ local function stepUltimate(ult: UltimateState, t: number, dt: number)
 		fireUltimate(ult, ult.stage) -- the timings moved: re-sync every client's telegraph
 	end
 
+	if not isAlive(target) then
+		-- The target left, or someone else exploded them first: not the performer's
+		-- fault, so it's a cancel with a refund, not a Miss.
+		cancelUltimate(attacker, true)
+		release(attacker, ult.heading)
+		return
+	end
+
 	if ult.stage == "Leap" then
-		if not isAlive(target) then
-			cancelUltimate(attacker, true) -- target left mid-leap: not the performer's fault, refund
-			release(attacker)
-			return
-		end
 		if t < ult.diveAt then
 			-- Arrive at the apex exactly at diveAt, whatever the frame rate.
 			mover.velocity.VectorVelocity = (ult.apex - attacker.root.Position) / math.max(ult.diveAt - t, dt)
+			return
+		end
+		-- A stunned or tumbling target (say, a kick just landed on them) can't DASH
+		-- yet. Hang at the apex until they can (capped), so the dive's dodge window
+		-- always starts with them free to move. Clients re-sync to the new dive time.
+		local freeAt = math.min(target.holdUntil, ult.apexHoldUntil)
+		if target.flight == nil and freeAt > t then
+			mover.velocity.VectorVelocity = Vector3.zero
+			if ult.diveAt ~= freeAt then
+				ult.diveAt = freeAt
+				fireUltimate(ult, "Leap") -- once per new dive time, not every frame
+			end
 			return
 		end
 
@@ -1259,7 +1319,7 @@ local function stepUltimate(ult: UltimateState, t: number, dt: number)
 		ult.impactAt = t + ULT.DiveTime
 		ult.direction = if path.Magnitude > 1e-3 then path.Unit else -Vector3.yAxis
 		ult.speed = path.Magnitude / ULT.DiveTime
-		mover.align.CFrame = feetFirst(ult.direction)
+		mover.align.CFrame = feetFirst(ult.direction, ult.heading)
 		fireUltimate(ult, "Dive")
 	end
 
@@ -1831,6 +1891,7 @@ function CombatService.registerCombatant(player: Player): boolean
 		dashReadyAt = 0,
 		ultCharge = 0,
 		ultPublished = 0,
+		parryCharge = 0,
 		ultimate = nil,
 		flight = nil,
 		incoming = {},

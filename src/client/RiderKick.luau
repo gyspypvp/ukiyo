@@ -116,7 +116,8 @@ local R6_TUCK: Pose = {
 }
 
 local states: { [Model]: PoseState } = {}
-local leaps: { [Player]: number } = {} -- ULTIMATE performers mid-leap -> server time the dive begins
+type Leap = { startedAt: number, diveAt: number } -- server times
+local leaps: { [Player]: Leap } = {} -- ULTIMATE performers mid-leap
 
 local function motorsOf(character: Model): { [string]: Motor6D }
 	local motors: { [string]: Motor6D } = {}
@@ -191,12 +192,12 @@ local function step(dt: number)
 			continue
 		end
 		local performing = player:GetAttribute(ATTR.Ultimate) == true
-		local diveAt: number? = leaps[player]
-		if diveAt and t >= diveAt then
+		local leap: Leap? = leaps[player]
+		if leap and t >= leap.diveAt then
 			leaps[player] = nil -- the leap is over (the Dive / Miss / Cancel packet also ends it)
-			diveAt = nil
+			leap = nil
 		end
-		local wanted: Mode? = if diveAt
+		local wanted: Mode? = if leap
 			then "Flip"
 			elseif performing or player:GetAttribute(ATTR.Flying) == true then "Kick"
 			else nil
@@ -221,8 +222,10 @@ local function step(dt: number)
 			continue
 		end
 
-		if state.mode == "Flip" and diveAt then
-			local progress = 1 - (diveAt - t) / Config.Ultimate.LeapTime
+		if state.mode == "Flip" and leap then
+			-- One flip over LeapTime from the start, then hold the tuck if the leap
+			-- hangs at its apex (the server can push the dive back).
+			local progress = (t - leap.startedAt) / Config.Ultimate.LeapTime
 			applyFlip(state, progress, state.weight)
 		else
 			applyPose(state, if state.isR6 then R6_KICK else R15_KICK, state.weight)
@@ -319,9 +322,15 @@ function RiderKick.glow(character: Model, color: Color3, power: number): Glow?
 	}
 end
 
--- An ULTIMATE leap started: flip until `diveAt` (server time), then the kick pose for the dive.
+-- An ULTIMATE leap started (or was re-synced): flip, hold the tuck until `diveAt`
+-- (server time), then the kick pose for the dive. A re-sync keeps the original start.
 function RiderKick.startLeap(player: Player, diveAt: number)
-	leaps[player] = diveAt
+	local leap = leaps[player]
+	if leap then
+		leap.diveAt = diveAt
+	else
+		leaps[player] = { startedAt = diveAt - Config.Ultimate.LeapTime, diveAt = diveAt }
+	end
 end
 
 -- The ULTIMATE dived early, missed or was cancelled.

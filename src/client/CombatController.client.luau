@@ -69,6 +69,7 @@ end)
 -- How long before impact the warning ring starts closing (purely visual).
 local WARNING_LEAD = 1.0
 local LAUNCH_BUFFER = 0.75 -- a Kick pressed this long before it's allowed still fires
+local DASH_BUFFER = 0.4 -- a DASH pressed this long before it's allowed still fires
 local PARRY_MIN_INTERVAL = 1 / 15 -- mash cap, safely under the server's Parry rate limit
 local DOT_COLOR = Color3.fromRGB(255, 45, 45)
 
@@ -86,6 +87,9 @@ type ActionButton = {
 	caption: TextLabel,
 	timer: TextLabel, -- cooldown seconds, ULTIMATE %, "MASH", ...
 	scale: UIScale,
+	hint: TextLabel?, -- the key hint under the button (none on touch-only devices)
+	keyboardKey: string,
+	gamepadKey: string,
 }
 
 type Hud = {
@@ -113,7 +117,9 @@ local parryLockUntil = 0 -- mirror of the server's whiff cooldown (server time)
 local duelUntil = 0 -- mirror of the server's duel window: misses cost nothing until then
 local lastParrySent = 0 -- os.clock() of the last Block sent (mash cap)
 local pendingLaunchUntil = 0 -- a buffered Kick fires if it becomes allowed before this (local clock)
+local pendingDashUntil = 0 -- same for DASH (e.g. pressed while still tumbling from a hit)
 local requestLaunch: () -> () -- defined with the other input handlers below
+local requestDash: () -> ()
 
 local losParams = RaycastParams.new()
 losParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -192,7 +198,15 @@ end
 	a cooldown shade that retreats as it comes back, and (on keyboard / gamepad)
 	a small key hint under it.
 ]]
-local function actionButton(parent: Instance, name: string, accent: Color3, diameter: number, key: string): ActionButton
+local function actionButton(
+	parent: Instance,
+	name: string,
+	accent: Color3,
+	diameter: number,
+	keyboardKey: string,
+	gamepadKey: string,
+	touchOnly: boolean
+): ActionButton
 	local button = Instance.new("TextButton")
 	button.Name = name
 	button.Size = UDim2.fromOffset(diameter, diameter)
@@ -234,14 +248,16 @@ local function actionButton(parent: Instance, name: string, accent: Color3, diam
 	timer.Size = UDim2.fromScale(0.6, 0.16)
 	timer.ZIndex = 4
 
-	if key ~= "" then
+	local hintText: TextLabel? = nil
+	if not touchOnly then
 		local hint = UiTheme.panel(button, "Key", UDim.new(0, 6))
 		hint.AnchorPoint = Vector2.new(0.5, 0)
 		hint.Position = UDim2.new(0.5, 0, 1, 5)
 		hint.Size = UDim2.fromOffset(36, 17)
-		local hintText = UiTheme.text(hint, UiTheme.Font, COLORS.SubText, 11)
-		hintText.Size = UDim2.fromScale(1, 1)
-		hintText.Text = key
+		local text = UiTheme.text(hint, UiTheme.Font, COLORS.SubText, 11)
+		text.Size = UDim2.fromScale(1, 1)
+		text.Text = keyboardKey
+		hintText = text
 	end
 
 	return {
@@ -251,6 +267,9 @@ local function actionButton(parent: Instance, name: string, accent: Color3, diam
 		caption = caption,
 		timer = timer,
 		scale = scale,
+		hint = hintText,
+		keyboardKey = keyboardKey,
+		gamepadKey = gamepadKey,
 	}
 end
 
@@ -262,14 +281,12 @@ local function buildHud(): Hud
 	gui.Parent = playerGui
 
 	local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-	local function key(text: string): string
-		return if touchOnly then "" else text
-	end
-	local block = actionButton(gui, "BLOCK", COLORS.Block, if touchOnly then 84 else 76, key("F"))
-	local kick = actionButton(gui, "KICK", COLORS.Kick, if touchOnly then 84 else 76, key("LMB"))
-	local dash = actionButton(gui, "DASH", COLORS.Dash, if touchOnly then 60 else 62, key("Q"))
-	local skill = actionButton(gui, "SKILL", COLORS.Skill, if touchOnly then 60 else 62, key("E"))
-	local ultimate = actionButton(gui, "ULT", COLORS.UltA, if touchOnly then 66 else 70, key("R"))
+	local big, small = if touchOnly then 84 else 76, if touchOnly then 60 else 62
+	local block = actionButton(gui, "BLOCK", COLORS.Block, big, "F", "L1", touchOnly)
+	local kick = actionButton(gui, "KICK", COLORS.Kick, big, "LMB", "R2", touchOnly)
+	local dash = actionButton(gui, "DASH", COLORS.Dash, small, "Q", "B", touchOnly)
+	local skill = actionButton(gui, "SKILL", COLORS.Skill, small, "E", "Y", touchOnly)
+	local ultimate = actionButton(gui, "ULT", COLORS.UltA, if touchOnly then 66 else 70, "R", "X", touchOnly)
 
 	-- The ULTIMATE meter: a gradient fill that rises inside its button as it charges.
 	local fillFrame = Instance.new("Frame")
@@ -380,6 +397,24 @@ CombatFX.init(playerGui)
 HitFeedback.init(playerGui)
 local hud = buildHud()
 
+-- Key hints follow whatever the player is using right now: keyboard keys, gamepad
+-- buttons, or nothing for touch.
+local function refreshKeyHints()
+	local lastInput = UserInputService:GetLastInputType()
+	local gamepad = string.match(lastInput.Name, "^Gamepad") ~= nil
+	local touch = lastInput == Enum.UserInputType.Touch
+	for _, action in { hud.block, hud.kick, hud.dash, hud.skill, hud.ultimate } do
+		local hint = action.hint
+		local panel = hint and hint.Parent
+		if hint and panel and panel:IsA("GuiObject") then
+			hint.Text = if gamepad then action.gamepadKey else action.keyboardKey
+			panel.Visible = not touch
+		end
+	end
+end
+UserInputService.LastInputTypeChanged:Connect(refreshKeyHints)
+refreshKeyHints()
+
 -- 1. TARGETING ----------------------------------------------------------------------------
 
 local function collectCandidates(): { Targeting.Candidate }
@@ -489,10 +524,10 @@ local function updateButtons(t: number)
 
 	showCooldown(hud.kick, t, numberAttr(ATTR.KickReadyAt), Config.Kick.Cooldown, canKickNow(t))
 
-	-- BLOCK: the whiff lockout, or "MASH" while a duel makes misses free.
-	local dueling = t < duelUntil
-	showCooldown(hud.block, t, if dueling then 0 else parryLockUntil, Config.Parry.WhiffCooldown, true)
-	if dueling then
+	-- BLOCK: the whiff lockout, or "MASH" while a duel makes misses free. (A lockout
+	-- from before the duel still stands on the server, so it still shows here.)
+	showCooldown(hud.block, t, parryLockUntil, Config.Parry.WhiffCooldown, true)
+	if t < duelUntil and t >= parryLockUntil then
 		hud.block.timer.Text = "MASH"
 		hud.block.ring.Thickness = 2.5 + 2 * (0.5 + 0.5 * math.sin(t * 30))
 	else
@@ -538,6 +573,14 @@ RunService:BindToRenderStep("ClashKickCombat", Enum.RenderPriority.Camera.Value 
 		pendingLaunchUntil = 0
 		if stillWanted then
 			requestLaunch()
+		end
+	end
+	-- ...and a buffered DASH (a dodge pressed while still tumbling must not be lost).
+	if pendingDashUntil > 0 and canDashNow(t) then
+		local stillWanted = os.clock() <= pendingDashUntil
+		pendingDashUntil = 0
+		if stillWanted then
+			requestDash()
 		end
 	end
 end)
@@ -586,8 +629,8 @@ local function requestParry()
 	end
 	local t = serverNow()
 	local dueling = t < duelUntil
-	if t < parryLockUntil and not dueling then
-		return -- still in whiff cooldown; the shaded button shows it
+	if t < parryLockUntil then
+		return -- still in whiff cooldown (one from before a duel still counts); the shaded button shows it
 	end
 	local kick = soonestIncoming() -- the server answers the kick closest to landing too
 	if kick == nil and not dueling then
@@ -600,8 +643,11 @@ local function requestParry()
 end
 
 -- Dash where you're moving (thumbstick / WASD), or where the camera faces if standing still.
-local function requestDash()
+function requestDash()
 	if not canDashNow(serverNow()) then
+		if isTrue(ATTR.InArena) and not isTrue(ATTR.Ultimate) then
+			pendingDashUntil = os.clock() + DASH_BUFFER -- stunned / tumbling / cooling down: buffer it
+		end
 		return
 	end
 	local character = localPlayer.Character
@@ -714,8 +760,11 @@ remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedP
 
 	local mine = payload.attackerId == localPlayer.UserId or payload.targetId == localPlayer.UserId
 	if payload.outcome == "Parried" and mine then
-		-- We're in a duel now: mirror the server's free-mash window.
-		duelUntil = serverNow() + Config.Duel.SpamWindow
+		-- We're in a duel now: mirror the server's free-mash window. The server opened it
+		-- when it resolved the parry and judges presses by when they ARRIVE, so end ours
+		-- a round trip early; a press past the real window just gets a ParryFeedback lock.
+		local margin = math.min(localPlayer:GetNetworkPing() * 2, 0.3)
+		duelUntil = serverNow() + Config.Duel.SpamWindow - margin
 	end
 
 	-- Head-on: we kicked each other. Each kick resolves separately, so only toast for the one we threw.
@@ -786,6 +835,7 @@ localPlayer:GetAttributeChangedSignal(ATTR.InArena):Connect(function()
 		ultimateThreat = nil
 		lockTarget = nil
 		pendingLaunchUntil = 0
+		pendingDashUntil = 0
 		duelUntil = 0
 	end
 end)

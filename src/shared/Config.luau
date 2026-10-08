@@ -96,9 +96,11 @@ Config.Dash = table.freeze({
 -- zone before it lands.
 Config.Ultimate = table.freeze({
 	ChargePerHit = 0.30, -- meter gained (0..1) for every kick you land
-	ChargePerParry = 0.15, -- ...for every successful parry
+	ChargePerParry = 0.15, -- ...for every successful parry...
+	MaxParryChargePerRound = 1.5, -- ...up to this much per round (long duels / colluding friends can't farm it)
 	ChargePerSecond = 1 / 90, -- ...and slowly over time while fighting
 	LeapTime = 0.6, -- the telegraphed leap + flip before the dive
+	MaxApexHold = 0.8, -- the leap hangs at its apex (up to this long) while the target is stunned / tumbling
 	LeapHeight = 24, -- studs above the start at the top of the leap
 	LeapForward = 0.35, -- fraction of the way to the target covered during the leap
 	DiveTime = 0.5, -- seconds from the impact marker locking to impact: the window to DASH out

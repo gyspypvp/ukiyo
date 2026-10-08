@@ -163,6 +163,7 @@ local function popup(position: Vector3, text: string, color: Color3, height: num
 	label.Size = UDim2.fromScale(1, 1)
 	label.Text = text
 	local outline = UiTheme.stroke(label, 1.5, Color3.new(0, 0, 0), 0.35)
+	outline.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual -- outline the letters, not the box
 
 	TweenService:Create(gui, TweenInfo.new(0.9, Enum.EasingStyle.Quad), { StudsOffset = Vector3.new(0, rise, 0) })
 		:Play()
@@ -195,9 +196,12 @@ local function shakeCamera(origin: Vector3, strength: number, duration: number)
 			RunService:UnbindFromRenderStep(name)
 			return
 		end
-		-- Applied after the camera script each frame, so it never accumulates.
+		-- A positional jolt applied after the camera script each frame. Position only:
+		-- the camera module reads back the look direction (never the position), so a
+		-- rotational shake would accumulate into a permanent aim drift.
 		local decay = amplitude * (1 - elapsed / duration)
-		current.CFrame = current.CFrame * CFrame.Angles((math.random() - 0.5) * decay, (math.random() - 0.5) * decay, 0)
+		local jolt = Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5)
+		current.CFrame = current.CFrame + jolt * decay
 	end)
 end
 
@@ -582,15 +586,26 @@ local function explode(victim: Player?, position: Vector3, color: Color3)
 	Debris:AddItem(emitterPart, 2.2)
 
 	burst(position, color, 90, 60)
-	shakeCamera(position, 0.09, 0.45)
+	shakeCamera(position, 1.6, 0.45)
 
 	local character = victim and victim.Character
-	if character then
-		setBodyTransparency(character, 1)
-		task.delay(EXPLOSION_HIDE_TIME, function()
-			if victim and victim.Character == character then
-				setBodyTransparency(character, 0)
+	if victim and character then
+		-- Re-applied every frame after the camera: on the victim's own screen the
+		-- camera's transparency controller rewrites it (e.g. when the kill-cam
+		-- switches the camera subject).
+		local name = `CK_Hide{victim.UserId}`
+		local hideUntil = os.clock() + EXPLOSION_HIDE_TIME
+		RunService:UnbindFromRenderStep(name)
+		RunService:BindToRenderStep(name, Enum.RenderPriority.Camera.Value + 3, function()
+			local stillThere = victim.Character == character
+			if os.clock() >= hideUntil or not stillThere then
+				RunService:UnbindFromRenderStep(name)
+				if stillThere then
+					setBodyTransparency(character, 0)
+				end
+				return
 			end
+			setBodyTransparency(character, 1)
 		end)
 	end
 end
