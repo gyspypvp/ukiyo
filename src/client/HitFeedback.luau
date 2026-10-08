@@ -316,25 +316,12 @@ end
 
 -- Public API -----------------------------------------------------------------------------
 
-function HitFeedback.isCardVisible(): boolean
-	local ui = widgets
-	return ui ~= nil and ui.card.Visible
-end
-
 -- Hide the card now (another kick is coming at you, or the round ended).
 function HitFeedback.hideCard()
 	cardToken += 1
 	local ui = widgets
 	if ui then
 		ui.card.Visible = false
-	end
-end
-
--- Replace the card's bottom line, e.g. with the Surge prompt once it actually arrives.
-function HitFeedback.setCardTip(text: string)
-	local ui = widgets
-	if ui and ui.card.Visible then
-		ui.cardTip.Text = text
 	end
 end
 

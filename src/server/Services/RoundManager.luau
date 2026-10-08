@@ -15,8 +15,8 @@
 	  * rewards for kills / parries / wins, bet settlement
 	  * replicating phase state through attributes (late-join safe)
 
-	Everything mode-specific (who gets the Surge, who may target whom, what a
-	KO means, how a round is won) is delegated through the GameMode contract in
+	Everything mode-specific (who may kick, who may be kicked, what a KO
+	means, how a round is won) is delegated through the GameMode contract in
 	ServerTypes. Adding Juggernaut = register one more GameMode.
 ]]
 
@@ -199,11 +199,6 @@ local function makeContext(round: Round): RoundContext
 		eliminate = function(victim: Player, killer: Player?, cause: ServerTypes.DefeatCause?)
 			eliminate(round, victim, killer, cause)
 		end,
-		combat = {
-			grantSurge = CombatService.grantSurge,
-			clearSurge = CombatService.clearSurge,
-			getSurgeHolders = CombatService.getSurgeHolders,
-		},
 	}
 end
 
@@ -383,6 +378,13 @@ local function runRound()
 	AbilityService.resetRound()
 	BettingService.openRound(ctx.isAlive, ctx.getAlive)
 	CombatService.setRules({
+		-- Nobody kicks during the spawn countdown; once the fight is on, the mode decides.
+		canLaunch = function(player: Player): boolean
+			return round.running
+				and (phase == "Active" or phase == "FinalDuel")
+				and round.alive[player] == true
+				and mode:canLaunch(ctx, player)
+		end,
 		canTarget = function(attacker: Player, target: Player): boolean
 			return round.alive[attacker] == true
 				and round.alive[target] == true

@@ -2,25 +2,29 @@
 --[[
 	CombatService (ModuleScript, server)
 	====================================
-	The authority for everything that happens inside a rally:
+	The authority for everything that happens in a fight. Anyone may kick at
+	any moment (one flight at a time, a short cooldown after each), so many
+	kicks can be in the air at once and several can chase the same player.
 
-	  * Surge ownership (who may launch)
 	  * the homing dash-kick: LinearVelocity + AlignOrientation on a
 	    SERVER-OWNED character, so the flight can't be speed-hacked or teleported
 	  * contact detection, done with server math and never reported by a client
 	  * parry validation, lag-compensated and checked on both timing and distance
 	  * speed compounding across the rally
 	  * stun, ricochet gap and counter-dash (ricochet / redirect)
+	  * head-on clashes (two players kicking each other bounce apart)
 	  * basic physics-exploit checks (speed/teleport rubber-banding, void KO)
 
 	It knows nothing about rounds, lobbies or win conditions. Those come from a
 	CombatRules object injected by the RoundManager, which forwards to the active
-	GameMode. A Juggernaut mode can reuse this file untouched; it only swaps
-	the rules.
+	GameMode (who may kick, who may be kicked). A Juggernaut mode can reuse this
+	file untouched; it only swaps the rules.
 
 	LIFE OF A KICK
 	--------------
 	  RequestLaunch --validate--> startFlight --Heartbeat steer--> contact?
+	                                                                  |
+	          target kicking us back at the same time? -> head-on clash, both bounce
 	                                                                  |
 	              +---------------- "Clash" hold (latency-bounded) ---+
 	              |                                                   |
@@ -98,15 +102,10 @@ type Fighter = {
 	lastHitBy: Player?, -- credited if a hit knocks them off the arena
 	lastHitAt: number,
 
-	-- Surge
-	surge: boolean,
-	surgeSince: number,
-	rally: number, -- rally count carried into this fighter's next launch
-
 	-- Kicks
-	flight: Flight?, -- the kick this fighter is performing
-	incoming: Flight?, -- the kick aimed at this fighter
-	lastLaunchAt: number,
+	flight: Flight?, -- the kick this fighter is performing (at most one)
+	incoming: { [number]: Flight }, -- every kick currently aimed at this fighter, by kick id
+	kickReadyAt: number, -- server time when this fighter may start a new kick
 	parryLockUntil: number, -- whiff cooldown
 
 	-- Server-driven physics (flight + stun)
@@ -169,6 +168,9 @@ CombatService.Flagged = flagged -- (player, reason): integrity heuristics trippe
 
 -- State --------------------------------------------------------------------------
 local DEFAULT_RULES: ServerTypes.CombatRules = {
+	canLaunch = function(_player: Player): boolean
+		return true
+	end,
 	canTarget = function(_attacker: Player, _target: Player): boolean
 		return true
 	end,
@@ -451,10 +453,12 @@ end
 
 --[[
 	ETA sync. The impact ETA changes every frame as the target moves, but
-	clients only need it when it meaningfully changes: send at most every
-	EtaBroadcastInterval, and only on a drift > EtaBroadcastDrift (or as a
-	keep-alive every 4 intervals). It goes over an UnreliableRemoteEvent because
-	every update supersedes the previous one. -1 means "frozen / unknown".
+	only the TARGET draws a warning ring from it, so it goes to the target alone
+	(with many kicks in the air, broadcasting every ETA to everyone would waste
+	bandwidth). Sent at most every EtaBroadcastInterval, and only on a drift >
+	EtaBroadcastDrift (or as a keep-alive every 4 intervals), over an
+	UnreliableRemoteEvent because every update supersedes the previous one.
+	-1 means "frozen / unknown".
 ]]
 local function broadcastEta(flight: Flight, t: number, force: boolean?)
 	local eta = if flight.phase == "Frozen" then -1 else flight.eta
@@ -465,7 +469,7 @@ local function broadcastEta(flight: Flight, t: number, force: boolean?)
 	then
 		flight.lastEtaSent = eta
 		flight.lastEtaSentAt = t
-		net().KickUpdated:FireAllClients(flight.id, eta, t)
+		net().KickUpdated:FireClient(flight.target.player, flight.id, eta, t)
 	end
 end
 
@@ -526,30 +530,23 @@ end
 
 -- Targets ----------------------------------------------------------------------------
 
+-- Several kicks may chase the same target; anyone alive and in range is fair game.
 local function isEligibleTarget(attacker: Fighter, target: Fighter): boolean
 	return target ~= attacker
 		and isAlive(target)
-		and target.incoming == nil
 		and (target.root.Position - attacker.root.Position).Magnitude <= KICK.MaxRange
 		and rules.canTarget(attacker.player, target.player)
 end
 
--- Nearest eligible target (auto-launch, or retarget when the target vanishes).
-local function pickAutoTarget(attacker: Fighter): Fighter?
-	local best: Fighter? = nil
-	local bestDistance = math.huge
-	for _, candidate in fighters do
-		if isEligibleTarget(attacker, candidate) then
-			local distance = (candidate.root.Position - attacker.root.Position).Magnitude
-			if distance < bestDistance then
-				best, bestDistance = candidate, distance
-			end
-		end
-	end
-	return best
+-- When this kick would land (math.huge while frozen by a Lag Switch).
+local function impactTimeOf(flight: Flight): number
+	return if flight.phase == "Frozen" then math.huge else (flight.impactAt or flight.eta)
 end
 
 -- Flights ----------------------------------------------------------------------------
+
+-- Forward declaration: startFlight (a parry made mid-flight) needs finishFlight, defined below it.
+local finishFlight: (flight: Flight) -> ()
 
 --[[
 	LAUNCH: the kicker becomes a human missile.
@@ -568,6 +565,13 @@ local function startFlight(
 ): Flight
 	local t = now()
 	nextKickId += 1
+
+	-- Parrying while already flying: the ricochet replaces your current kick.
+	local previous = attacker.flight
+	if previous then
+		finishFlight(previous)
+		broadcastResolved(previous, "Cancelled", false)
+	end
 
 	local offset = target.root.Position - attacker.root.Position
 	local gap = offset.Magnitude
@@ -617,14 +621,10 @@ local function startFlight(
 	setCollisionGroup(attacker.character, Config.CollisionGroups.Flying)
 
 	attacker.flight = flight
-	attacker.surge = true
-	attacker.rally = rally
-	attacker.lastLaunchAt = t
-	target.incoming = flight
+	target.incoming[flight.id] = flight
 	flights[flight.id] = flight
 	recordSample(flight, t, gap)
 
-	attacker.player:SetAttribute(ATTR.Surged, true)
 	attacker.player:SetAttribute(ATTR.Flying, true)
 
 	local payload: Types.KickStartedPayload = {
@@ -642,17 +642,18 @@ local function startFlight(
 	return flight
 end
 
--- Detach a flight from both fighters. Does NOT release the kicker's physics.
-local function finishFlight(flight: Flight)
+-- Detach a flight from both fighters and start the kicker's cooldown.
+-- Does NOT release the kicker's physics.
+function finishFlight(flight: Flight)
 	flight.active = false
 	flights[flight.id] = nil
 	local attacker = flight.attacker
 	if attacker.flight == flight then
 		attacker.flight = nil
 	end
-	if flight.target.incoming == flight then
-		flight.target.incoming = nil
-	end
+	flight.target.incoming[flight.id] = nil
+	attacker.kickReadyAt = now() + KICK.Cooldown
+	attacker.player:SetAttribute(ATTR.KickReadyAt, attacker.kickReadyAt)
 	attacker.mover.velocity.VectorVelocity = Vector3.zero
 	attacker.player:SetAttribute(ATTR.Flying, false)
 	if attacker.character.Parent then
@@ -660,33 +661,29 @@ local function finishFlight(flight: Flight)
 	end
 end
 
--- Abort a kick (target left, timeout, ...). The kicker keeps the Surge and may relaunch.
+-- Abort a kick (target gone, timeout, ...). The kicker lands and may kick again after the cooldown.
 local function cancelFlight(flight: Flight)
 	finishFlight(flight)
 	release(flight.attacker)
 	broadcastResolved(flight, "Cancelled", false)
 end
 
--- The target vanished mid-flight: home in on the next best target instead.
-local function redirectFlight(flight: Flight, newTarget: Fighter)
-	finishFlight(flight)
-	broadcastResolved(flight, "Cancelled", false)
-	startFlight(flight.attacker, newTarget, flight.rally, false, false)
-end
-
 --[[
 	No valid parry arrived during the clash window: the kick lands.
 	Damage scales with the kick's speed (CombatMath.hitDamage), so a fast rally
 	hurts far more than an opening kick. At 0 HP the victim is Defeated;
-	otherwise they tumble away and the GameMode hears about it via Damaged
-	(Surge mode passes the Surge to them).
+	otherwise they tumble away and the GameMode hears about it via Damaged.
+	A victim who was mid-kick themselves is knocked out of the air.
 ]]
 local function resolveHit(flight: Flight)
 	local attacker, target = flight.attacker, flight.target
 	finishFlight(flight)
-	attacker.surge = false -- the Surge is spent; the GameMode decides who gets it next
-	attacker.player:SetAttribute(ATTR.Surged, false)
 	release(attacker)
+	local ownKick = target.flight
+	if ownKick then
+		finishFlight(ownKick)
+		broadcastResolved(ownKick, "Cancelled", false)
+	end
 
 	local damage = CombatMath.hitDamage(flight.speed, KICK.BaseSpeed, HEALTH.BaseDamage, HEALTH.DamageExponent)
 	target.health = math.max(target.health - damage, 0)
@@ -704,17 +701,17 @@ local function resolveHit(flight: Flight)
 end
 
 --[[
-	Blast a parried attacker back so it ends up `gap` studs from the defender
-	along the incoming axis, unless it is already further away. The move is an
-	instant server-side reposition, not a glide: the counter-dash launches on
-	the same frame, and a glide would be overtaken at high rally speeds, turning
-	every late parry into a point-blank, unanswerable kill.
+	Blast a fighter back so it ends up `gap` studs from `origin` along `axis`,
+	unless it is already further away. The move is an instant server-side
+	reposition, not a glide: after a parry the counter-dash launches on the same
+	frame, and a glide would be overtaken at high rally speeds, turning every late
+	parry into a point-blank, unanswerable kill.
 	A raycast stops the blast at walls and floors.
 ]]
-local function blastBack(attacker: Fighter, defender: Fighter, axis: Vector3, gap: number)
-	local origin = attacker.root.Position
-	local destination = defender.root.Position + axis * gap
-	if (origin - defender.root.Position).Magnitude >= gap then
+local function blastBack(fighter: Fighter, origin: Vector3, axis: Vector3, gap: number)
+	local start = fighter.root.Position
+	local destination = origin + axis * gap
+	if (start - origin).Magnitude >= gap then
 		return
 	end
 
@@ -726,11 +723,11 @@ local function blastBack(attacker: Fighter, defender: Fighter, axis: Vector3, ga
 	end
 	params.FilterDescendantsInstances = exclude
 
-	local hit = Workspace:Raycast(origin, destination - origin, params)
+	local hit = Workspace:Raycast(start, destination - start, params)
 	if hit then
 		destination = hit.Position - axis * 2 -- stop just short of the wall
 	end
-	attacker.root.CFrame = CFrame.new(destination) * attacker.root.CFrame.Rotation
+	fighter.root.CFrame = CFrame.new(destination) * fighter.root.CFrame.Rotation
 end
 
 --[[
@@ -738,9 +735,9 @@ end
 	  1. The attacker's momentum is cancelled: blasted back to the RICOCHET GAP
 	     set by the defender's stance (CombatMath.ricochetGap), then stunned
 	     mid-air for StunTime.
-	  2. The defender absorbs the Surge and instantly ricochets, at the attacker
-	     or at the redirect target it was locked onto, with rally + 1
-	     (compounding +10%) and the one-shot Perfect boost if earned.
+	  2. The defender instantly ricochets (even if they were mid-kick themselves),
+	     at the attacker or at the redirect target it was locked onto, with
+	     rally + 1 (compounding +10%) and the one-shot Perfect boost if earned.
 ]]
 local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighter?)
 	local attacker, defender = flight.attacker, flight.target
@@ -756,12 +753,10 @@ local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighte
 		PARRY.RicochetGapMin,
 		PARRY.RicochetGapMax
 	)
-	attacker.surge = false
-	attacker.player:SetAttribute(ATTR.Surged, false)
 	attacker.lastHitBy = defender.player -- if the blast knocks them off the arena, the defender gets the credit
 	attacker.lastHitAt = now()
 	stun(attacker, PARRY.StunTime, -axis)
-	blastBack(attacker, defender, axis, gap)
+	blastBack(attacker, defender.root.Position, axis, gap)
 
 	broadcastResolved(flight, "Parried", perfect)
 
@@ -773,6 +768,30 @@ local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighte
 		startFlight(defender, attacker, rally, perfect, true)
 	end
 	parried:Fire(defender.player, attacker.player, perfect, rally)
+end
+
+--[[
+	HEAD-ON CLASH: two fighters kicking EACH OTHER meet in the middle. Neither
+	kick lands: both bounce apart and hang stunned for a beat, with no damage, and
+	the rally ends. Without this rule, whichever flight the server happened to
+	step first would win.
+]]
+local function resolveHeadOn(a: Flight, b: Flight)
+	local first, second = a.attacker, b.attacker
+	finishFlight(a)
+	finishFlight(b)
+	local axis = first.root.Position - second.root.Position
+	axis = if axis.Magnitude > 1e-3 then axis.Unit else -a.direction
+	local middle = (first.root.Position + second.root.Position) / 2
+	local t = now()
+	first.lastHitBy, first.lastHitAt = second.player, t -- a bounce off the edge credits the other kicker
+	second.lastHitBy, second.lastHitAt = first.player, t
+	stun(first, KICK.ClashStun, -axis)
+	stun(second, KICK.ClashStun, axis)
+	blastBack(first, middle, axis, KICK.ClashGap / 2)
+	blastBack(second, middle, -axis, KICK.ClashGap / 2)
+	broadcastResolved(a, "Clashed", false)
+	broadcastResolved(b, "Clashed", false)
 end
 
 -- Contact reached: hold the "clash frame" while a late-arriving parry can still land.
@@ -817,12 +836,7 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 		return
 	end
 	if not isAlive(target) then
-		local replacement = pickAutoTarget(attacker)
-		if replacement then
-			redirectFlight(flight, replacement)
-		else
-			cancelFlight(flight)
-		end
+		cancelFlight(flight) -- target gone: land, and kick someone else after the cooldown
 		return
 	end
 	if t - flight.startedAt > KICK.MaxFlightTime then
@@ -880,7 +894,12 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 	-- Contact if inside the radius OR reachable within this frame, so a 400 stud/s
 	-- kick (~7 studs per frame) can't tunnel through the target between Heartbeats.
 	if gap <= KICK.ImpactRadius + flight.speed * dt then
-		enterClash(flight, t)
+		local counter = target.flight
+		if counter and counter.active and counter.target == attacker then
+			resolveHeadOn(flight, counter) -- we kicked each other: bounce, no damage
+		else
+			enterClash(flight, t)
+		end
 		return
 	end
 
@@ -1007,25 +1026,20 @@ end
 --[[
 	RequestLaunch(targetUserId, cameraCFrame)
 	The client says who its lock-on dot is on. The server re-checks EVERYTHING:
-	Surge holder, not flying, not stunned, cooldown, target eligibility (alive,
-	in range, mode rules) and that the target sits plausibly inside the camera
-	the client claims to have.
+	the mode allows this player to kick, not already flying, not stunned, kick
+	cooldown over, target eligibility (alive, in range, mode rules) and that the
+	target sits plausibly inside the camera the client claims to have.
 ]]
 local function onLaunchRequest(player: Player, rawTargetId: unknown, rawCamera: unknown)
 	if not launchLimiter:check(player) then
 		return
 	end
 	local attacker = fighters[player]
-	if attacker == nil or not isAlive(attacker) or not attacker.surge then
+	if attacker == nil or not isAlive(attacker) or not rules.canLaunch(player) then
 		return
 	end
 	local t = now()
-	if
-		attacker.flight
-		or attacker.incoming
-		or t < attacker.stunUntil
-		or t - attacker.lastLaunchAt < KICK.LaunchCooldown
-	then
+	if attacker.flight or t < attacker.stunUntil or t < attacker.kickReadyAt then
 		return
 	end
 
@@ -1046,7 +1060,7 @@ local function onLaunchRequest(player: Player, rawTargetId: unknown, rawCamera: 
 		return
 	end
 
-	startFlight(attacker, target, attacker.rally, false, false)
+	startFlight(attacker, target, 0, false, false) -- a fresh kick starts a new rally at base speed
 end
 
 local function whiff(defender: Fighter, t: number, result: Types.ParryResult, kickId: number)
@@ -1092,6 +1106,9 @@ end
 
 	4. Anti-spam. Any Block that parries nothing costs WhiffCooldown, so mashing
 	   F (or a naive macro) locks you out exactly when the kick arrives.
+
+	With several kicks incoming, Block answers the one the client named, or if
+	that one is gone or wasn't named, the one closest to landing.
 ]]
 local function onParryRequest(player: Player, rawKickId: unknown, rawStamp: unknown, rawLockId: unknown)
 	local receivedAt = now()
@@ -1108,9 +1125,19 @@ local function onParryRequest(player: Player, rawKickId: unknown, rawStamp: unkn
 	end
 
 	local kickId = Guard.integer(rawKickId, 0, 2 ^ 31) or 0
-	local flight = defender.incoming
 	-- kickId 0 = "whatever is coming at me": the press may beat KickStarted to the client.
-	if flight == nil or not flight.active or (kickId ~= 0 and kickId ~= flight.id) then
+	local flight: Flight? = defender.incoming[kickId]
+	if flight == nil or not flight.active then
+		flight = nil
+		local soonest = math.huge
+		for _, candidate in defender.incoming do
+			local impact = impactTimeOf(candidate)
+			if candidate.active and (flight == nil or impact < soonest) then
+				flight, soonest = candidate, impact
+			end
+		end
+	end
+	if flight == nil then
 		whiff(defender, receivedAt, "NoThreat", kickId)
 		return
 	end
@@ -1130,8 +1157,7 @@ local function onParryRequest(player: Player, rawKickId: unknown, rawStamp: unkn
 	end
 
 	-- 2. Timing
-	local impactTime = if flight.phase == "Frozen" then math.huge else (flight.impactAt or flight.eta)
-	local tti = impactTime - pressedAt
+	local tti = impactTimeOf(flight) - pressedAt
 	local window = PARRY.BaseWindow + PlayerDataService.getParryWindowBonus(player)
 	local verdict: CombatMath.Verdict = CombatMath.parryVerdict(tti, window, PARRY.PerfectWindow, PARRY.LateGrace)
 	if verdict == "Early" or verdict == "Late" then
@@ -1176,26 +1202,6 @@ local function stepHolds(t: number)
 	for _, fighter in fighters do
 		if fighter.holdUntil > 0 and fighter.flight == nil and t >= fighter.holdUntil then
 			release(fighter) -- stun over: physics back to the client, gravity takes over
-		end
-	end
-end
-
--- A Surge holder who stalls is launched at the nearest eligible target.
-local function stepSurgeHolders(t: number)
-	for _, fighter in fighters do
-		if
-			fighter.surge
-			and fighter.flight == nil
-			and isAlive(fighter)
-			and t >= fighter.stunUntil
-			and t - fighter.surgeSince > KICK.AutoLaunchTime
-		then
-			local target = pickAutoTarget(fighter)
-			if target then
-				startFlight(fighter, target, fighter.rally, false, false)
-			else
-				fighter.surgeSince = t
-			end
 		end
 	end
 end
@@ -1271,7 +1277,6 @@ local function onHeartbeat(dt: number)
 	end
 
 	stepHolds(t)
-	stepSurgeHolders(t)
 	stepMovement(t)
 end
 
@@ -1307,12 +1312,9 @@ function CombatService.registerCombatant(player: Player): boolean
 		health = HEALTH.MaxHealth,
 		lastHitBy = nil,
 		lastHitAt = 0,
-		surge = false,
-		surgeSince = 0,
-		rally = 0,
 		flight = nil,
-		incoming = nil,
-		lastLaunchAt = 0,
+		incoming = {},
+		kickReadyAt = 0,
 		parryLockUntil = 0,
 		serverOwned = false,
 		stunUntil = 0,
@@ -1353,6 +1355,7 @@ function CombatService.registerCombatant(player: Player): boolean
 
 	player:SetAttribute(ATTR.MaxHealth, HEALTH.MaxHealth)
 	player:SetAttribute(ATTR.Health, HEALTH.MaxHealth)
+	player:SetAttribute(ATTR.KickReadyAt, 0)
 	player:SetAttribute(ATTR.InArena, true)
 	return true
 end
@@ -1363,18 +1366,19 @@ function CombatService.unregisterCombatant(player: Player)
 	if fighter == nil then
 		return
 	end
-	fighters[player] = nil -- first, so retargeting below can't pick them
+	fighters[player] = nil
 
 	if fighter.flight then
 		cancelFlight(fighter.flight)
 	end
-	local incoming = fighter.incoming
-	if incoming and incoming.active then
-		local replacement = pickAutoTarget(incoming.attacker)
-		if replacement then
-			redirectFlight(incoming, replacement)
-		else
-			cancelFlight(incoming)
+	-- Every kick still chasing them lands harmlessly (snapshot: cancelling edits the map).
+	local chasing = {}
+	for _, flight in fighter.incoming do
+		table.insert(chasing, flight)
+	end
+	for _, flight in chasing do
+		if flight.active then
+			cancelFlight(flight)
 		end
 	end
 
@@ -1390,7 +1394,7 @@ function CombatService.unregisterCombatant(player: Player)
 	end
 
 	player:SetAttribute(ATTR.InArena, false)
-	player:SetAttribute(ATTR.Surged, false)
+	player:SetAttribute(ATTR.KickReadyAt, nil)
 	player:SetAttribute(ATTR.Flying, false)
 	player:SetAttribute(ATTR.Stunned, false)
 	player:SetAttribute(ATTR.Health, nil) -- health bars only exist in the arena
@@ -1412,28 +1416,9 @@ function CombatService.reset()
 	end
 end
 
--- Injected by the RoundManager: the active GameMode's targeting rules.
+-- Injected by the RoundManager: the active GameMode's launch/targeting rules.
 function CombatService.setRules(newRules: ServerTypes.CombatRules?)
 	rules = newRules or DEFAULT_RULES
-end
-
-function CombatService.grantSurge(player: Player, rally: number?)
-	local fighter = fighters[player]
-	if fighter == nil or not isAlive(fighter) then
-		return
-	end
-	fighter.surge = true
-	fighter.rally = rally or 0
-	fighter.surgeSince = now()
-	player:SetAttribute(ATTR.Surged, true)
-end
-
-function CombatService.clearSurge(player: Player)
-	local fighter = fighters[player]
-	if fighter and fighter.flight == nil then
-		fighter.surge = false
-		player:SetAttribute(ATTR.Surged, false)
-	end
 end
 
 -- Who would be credited if this combatant went down right now (see recentAttacker).
@@ -1446,16 +1431,6 @@ end
 function CombatService.getHealth(player: Player): number?
 	local fighter = fighters[player]
 	return if fighter then fighter.health else nil
-end
-
-function CombatService.getSurgeHolders(): { Player }
-	local holders = {}
-	for player, fighter in fighters do
-		if fighter.surge and isAlive(fighter) then
-			table.insert(holders, player)
-		end
-	end
-	return holders
 end
 
 -- Exposed for UI / tests: the exact speed the server would use.

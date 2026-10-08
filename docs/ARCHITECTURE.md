@@ -30,7 +30,7 @@ ServerScriptService
     │   ├── PlayerDataService ModuleScript   coins, upgrades, styles, crates, DataStore
     │   └── BettingService    ModuleScript   spectator bets on the round winner
     ├── GameModes
-    │   ├── SurgeMode         ModuleScript   Free-For-All Rally (live)
+    │   ├── SurgeMode         ModuleScript   Free-For-All Rally: everyone kicks, everyone blocks (live)
     │   └── JuggernautMode    ModuleScript   Tagger vs. Lobby (draft, not in rotation)
     └── Util
         ├── Guard             ModuleScript   validators for untrusted remote args
@@ -52,7 +52,7 @@ Only two kinds of top-level code run: one server `Script` (`Main`) and two clien
 | Concern | Owner | Notes |
 |---|---|---|
 | *When* things happen (phases, timers, teleports, payouts) | `RoundManager` | mode-agnostic |
-| *What the rules are* (Surge assignment, targeting, what a KO means, win condition) | the active `GameMode` | swappable |
+| *What the rules are* (who may kick, who may be kicked, what a KO means, win condition) | the active `GameMode` | swappable |
 | Kick physics, contact, parry validation, speed | `CombatService` | asks the mode via `CombatRules` |
 | Latency budget | `LatencyService` | consumed by `CombatService` |
 | Ability behaviour | `AbilityService` | gets a narrow `FlightControl` handle, never the raw flight |
@@ -63,20 +63,19 @@ Only two kinds of top-level code run: one server `Script` (`Main`) and two clien
 ## How modularity works
 
 ```
- RoundManager ──CombatRules{canTarget}──▶ CombatService
-      ▲   │                                    │
-      │   │  RoundContext                      │ Signals (deferred):
-      │   ▼  {getAlive, isAlive, eliminate,    │  Defeated(victim, attacker?, cause)
-      │                                        │  Damaged(victim, attacker, damage, hp)
-      │   GameMode   combat = CombatApi}       │  Parried(defender, attacker, perfect, rally)
-      │   (Surge |          │                  │  Launched, Flagged
-      │    Juggernaut)      └─grantSurge/──────▶ CombatService
-      └─────────── forwards Defeated/Parried ◀──┘
+ RoundManager ──CombatRules{canLaunch, canTarget}──▶ CombatService
+      ▲   │                                               │
+      │   │  RoundContext                                 │ Signals (deferred):
+      │   ▼  {getAlive, isAlive, eliminate}               │  Defeated(victim, attacker?, cause)
+      │   GameMode (Surge | Juggernaut)                   │  Damaged(victim, attacker, damage, hp)
+      │     canLaunch / canTarget / onDefeated /          │  Parried(defender, attacker, perfect, rally)
+      │     onDamaged / getResult / isFinalPhase          │  Launched, Flagged
+      └──────────── forwards Defeated / Damaged / Parried ◀┘
 ```
 
-- **CombatService never decides who wins or who gets eliminated.** When a kick lands it applies speed-scaled damage. It fires `Damaged(victim, attacker, damage, hp)` if the victim survives, or `Defeated(victim, attacker, "Kick")` at 0 HP, and stops there. The mode decides what each means: Surge passes the Surge to a survivor and eliminates at 0 HP; a future Juggernaut could give the tagger extra HP.
-- **Targeting is a rule, not a hard-code.** Before any launch, redirect or auto-target, CombatService asks `rules.canTarget(attacker, target)`. Surge allows anyone; Juggernaut lets runners hit only the tagger.
-- **Surge ownership is an API.** Modes call `grantSurge` / `clearSurge` / `getSurgeHolders`. Surge re-infects a random survivor after each KO; Juggernaut always returns it to the tagger. Neither needs to know anything about flights.
+- **CombatService never decides who wins or who gets eliminated.** When a kick lands it applies speed-scaled damage. It fires `Damaged(victim, attacker, damage, hp)` if the victim survives, or `Defeated(victim, attacker, "Kick")` at 0 HP, and stops there. The mode decides what each means: Surge eliminates at 0 HP; a future Juggernaut could give the tagger extra HP.
+- **Who may kick, and whom, are rules, not hard-codes.** Before any launch CombatService asks `rules.canLaunch(player)`, and before any launch or redirect `rules.canTarget(attacker, target)`. Surge lets every survivor kick anyone; Juggernaut lets only the tagger start kicks and lets runners hit only the tagger. The RoundManager also blocks kicking during the spawn countdown.
+- **Combat mechanics stay in CombatService.** Cooldowns, one kick in the air per player, several kicks per target, Block-while-flying and head-on clashes are the same in every mode; modes never touch flights.
 - **Signals are deferred.** Handlers run after CombatService finishes its current update, so a mode calling `eliminate()` → `unregisterCombatant()` can never re-enter half-updated combat state.
 
 ### Adding the Juggernaut mode (or any mode)
@@ -96,8 +95,8 @@ Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDue
 ```
 
 - **Spawning:** up to 15 eligible players are shuffled onto arena spawns, then `CombatService.registerCombatant` gives each a LinearVelocity rig (disabled) and the `CK_Characters` collision group.
-- **Active:** `mode:onRoundStart` grants the first Surge. The RoundManager ticks `mode:getResult` / `isFinalPhase` / `onTick` every 0.1 s.
-- **Hit survived:** damage applied, victim tumbles for 0.7 s (server-owned physics), attacker paid `CoinsPerHit`, mode `onDamaged` (Surge: the victim catches the Surge).
+- **Active:** kicking unlocks (`canLaunch` is false during Spawning). `mode:onRoundStart` runs, then the RoundManager ticks `mode:getResult` / `isFinalPhase` / `onTick` every 0.1 s.
+- **Hit survived:** damage applied, victim knocked out of the air if mid-kick, tumbles for 0.7 s (server-owned physics), attacker paid `CoinsPerHit`, mode `onDamaged`.
 - **KO (0 HP, knocked off, died, left):** CombatService fires `Defeated` → the mode calls `ctx.eliminate(victim, killer, cause)` → combatant unregistered, killer paid, client flings itself (cosmetic), kill-cam on the killer → teleported to the lobby after 1.25 s to spectate and bet.
 - **MatchEnd:** winner payout, participation coins, bets settled (refunded if there's no single winner), survivors return to the lobby.
 - A crash inside a round is caught (`xpcall`), combat is reset, and the loop continues.
@@ -112,7 +111,7 @@ Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDue
 | Faking velocity to bend the ETA or ricochet gap | client-reported velocity is clamped to what the humanoid can legitimately do before it feeds any math |
 | Auto-parry / forged timestamps | stamp clamped to measured RTT; timing **and** distance checks; whiff cooldown; no pre-press; metronome / inhuman-reaction heuristics |
 | Faking low ping | random-nonce pings can only make RTT look worse; median plus engine cross-check plus a 0.25 s cap bound "worse" |
-| Launching without the Surge / at anyone | server re-checks holder, cooldowns, range, mode rules, camera plausibility |
+| Kick spam / kicking at anyone | server re-checks mode `canLaunch`, one-kick-in-the-air, stun, kick cooldown, range, mode `canTarget`, camera plausibility |
 | Remote spam / malformed args | token-bucket rate limits on every remote; `Guard` validates type, NaN/inf and range |
 | Economy tampering | coins, upgrades, crates and bets are server-side; receipts are idempotent |
 | Falling out of the map to dodge | below `KillY` counts as a KO |

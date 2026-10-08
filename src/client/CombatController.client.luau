@@ -2,25 +2,29 @@
 --[[
 	CombatController (LocalScript, StarterPlayer/StarterPlayerScripts/Client)
 	=========================================================================
-	The player's hands and eyes in a rally:
+	The player's hands and eyes in a fight. Anyone can kick and Block at any
+	moment; several kicks may be coming at you at once.
 
 	  1. TARGETING: every frame, the camera dot-product lock-on picks the player
 	     closest to the crosshair and puts the red dot on them
 	     (Shared/Targeting.luau has the math).
-	  2. INPUT: Click / R2 = Launch, F / L1 = Block (parry), Q / Y = Ability.
-	     Mobile gets on-screen BLOCK / ABILITY buttons (plus KICK while
-	     holding the Surge).
+	  2. INPUT: Click / R2 = Kick, F / L1 = Block (parry), Q / Y = Ability.
+	     On-screen KICK / BLOCK / ABILITY buttons work on every platform and
+	     show their cooldowns. A Kick pressed while stunned or still cooling
+	     down is buffered briefly and fires the moment it's allowed.
 	  3. NETWORK: fires intent remotes. The client never decides an outcome; it
 	     reports WHAT it pressed and WHEN (synced server clock) and the server
 	     judges.
-	  4. VISUALS: the red "incoming" warning (edge glow + closing ring), driven
+	  4. VISUALS: the red "incoming" warning (edge glow + closing ring, plus an
+	     "x2" count when several kicks are coming) for the kick closest to
+	     landing, driven
 	     by the server's impact ETA on the shared clock rather than by the
 	     attacker's replicated position. The ring closes on the same moment the
 	     server will judge, even though the attacker's model you SEE is ~100 ms
 	     behind.
 
 	Anti-exploit note: everything here is advisory. Editing this script (or
-	firing the remotes by hand) cannot launch without the Surge, parry outside
+	firing the remotes by hand) cannot kick during a cooldown, parry outside
 	the server's window, or move a server-owned flying body.
 ]]
 
@@ -54,6 +58,7 @@ end)
 
 -- How long before impact the warning ring starts closing (purely visual).
 local WARNING_LEAD = 1.0
+local LAUNCH_BUFFER = 0.75 -- a Kick pressed this long before it's allowed still fires
 local DOT_COLOR = Color3.fromRGB(255, 45, 45)
 local BUTTON_COLOR = Color3.fromRGB(40, 110, 230)
 
@@ -69,6 +74,8 @@ type Hud = {
 	blockCooldown: Frame,
 	abilityButton: TextButton,
 	kickButton: TextButton,
+	kickCooldown: Frame,
+	ringCount: TextLabel,
 	warning: Frame,
 	warningStroke: UIStroke,
 	ring: Frame,
@@ -80,9 +87,10 @@ type Hud = {
 -- State --------------------------------------------------------------------------------
 
 local lockTarget: Player? = nil
-local incoming: IncomingKick? = nil
+local incomingKicks: { [number]: IncomingKick } = {} -- every kick aimed at us, by kick id
 local parryLockUntil = 0 -- mirror of the server's whiff cooldown (server time)
-local pendingLaunch = false -- Kick pressed while still tumbling/stunned: fire it the moment we recover
+local pendingLaunchUntil = 0 -- a buffered Kick fires if it becomes allowed before this (local clock)
+local requestLaunch: () -> () -- defined with the other input handlers below
 
 local losParams = RaycastParams.new()
 losParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -99,6 +107,21 @@ local function rootOf(player: Player): BasePart?
 		return root
 	end
 	return nil
+end
+
+-- The kick aimed at us that will land first (frozen Lag Switch kicks count as last), and how many there are.
+local function soonestIncoming(): (IncomingKick?, number)
+	local soonest: IncomingKick? = nil
+	local soonestEta = math.huge
+	local count = 0
+	for _, kick in incomingKicks do
+		count += 1
+		local eta = if kick.eta < 0 then math.huge else kick.eta
+		if soonest == nil or eta < soonestEta then
+			soonest, soonestEta = kick, eta
+		end
+	end
+	return soonest, count
 end
 
 local function isAliveCharacter(player: Player): boolean
@@ -175,25 +198,28 @@ local function buildHud(): Hud
 	gui.IgnoreGuiInset = true
 	gui.Parent = playerGui
 
-	local blockButton = actionButton(gui, "BLOCK", "🛡", "F", -58)
-	local abilityButton = actionButton(gui, "ABILITY", "»", "Q", 58)
-	local kickButton = actionButton(gui, "KICK", "⚡", "", 0)
-	kickButton.AnchorPoint = Vector2.new(1, 1)
-	kickButton.Position = UDim2.new(1, -36, 1, -140)
+	local kickKey = if UserInputService.KeyboardEnabled then "LMB" else ""
+	local kickButton = actionButton(gui, "KICK", "⚡", kickKey, -116)
 	kickButton.BackgroundColor3 = Color3.fromRGB(230, 70, 40)
-	kickButton.Visible = false
+	local blockButton = actionButton(gui, "BLOCK", "🛡", "F", 0)
+	local abilityButton = actionButton(gui, "ABILITY", "»", "Q", 116)
 
-	-- Whiff-cooldown shade that drains from the Block button.
-	local blockCooldown = Instance.new("Frame")
-	blockCooldown.Name = "Cooldown"
-	blockCooldown.AnchorPoint = Vector2.new(0, 1)
-	blockCooldown.Position = UDim2.fromScale(0, 1)
-	blockCooldown.Size = UDim2.fromScale(1, 0)
-	blockCooldown.BackgroundColor3 = Color3.new(0, 0, 0)
-	blockCooldown.BackgroundTransparency = 0.45
-	blockCooldown.Active = false
-	blockCooldown.Parent = blockButton
-	corner(blockCooldown, UDim.new(0, 12))
+	-- Cooldown shades that drain away as each action becomes available again.
+	local function cooldownShade(button: TextButton): Frame
+		local shade = Instance.new("Frame")
+		shade.Name = "Cooldown"
+		shade.AnchorPoint = Vector2.new(0, 1)
+		shade.Position = UDim2.fromScale(0, 1)
+		shade.Size = UDim2.fromScale(1, 0)
+		shade.BackgroundColor3 = Color3.new(0, 0, 0)
+		shade.BackgroundTransparency = 0.45
+		shade.Active = false
+		shade.Parent = button
+		corner(shade, UDim.new(0, 12))
+		return shade
+	end
+	local blockCooldown = cooldownShade(blockButton)
+	local kickCooldown = cooldownShade(kickButton)
 
 	-- Red warning: screen-edge glow + a ring that closes toward the impact moment.
 	local warning = Instance.new("Frame")
@@ -226,6 +252,19 @@ local function buildHud(): Hud
 	bang.TextColor3 = DOT_COLOR
 	bang.Parent = ring
 
+	-- "x2", "x3": how many kicks are coming at you right now.
+	local ringCount = Instance.new("TextLabel")
+	ringCount.AnchorPoint = Vector2.new(0.5, 0)
+	ringCount.Position = UDim2.new(0.5, 0, 1, 6)
+	ringCount.Size = UDim2.fromOffset(60, 30)
+	ringCount.BackgroundTransparency = 1
+	ringCount.Font = Enum.Font.LuckiestGuy
+	ringCount.TextScaled = true
+	ringCount.TextColor3 = DOT_COLOR
+	ringCount.Text = ""
+	ringCount.Parent = ring
+	stroke(ringCount, 2, Color3.fromRGB(40, 0, 0))
+
 	-- The red lock-on dot, drawn ON the target (not at screen centre).
 	local lockDot = Instance.new("BillboardGui")
 	lockDot.Name = "ClashKickLockOn"
@@ -249,6 +288,8 @@ local function buildHud(): Hud
 		blockCooldown = blockCooldown,
 		abilityButton = abilityButton,
 		kickButton = kickButton,
+		kickCooldown = kickCooldown,
+		ringCount = ringCount,
 		warning = warning,
 		warningStroke = warningStroke,
 		ring = ring,
@@ -315,21 +356,23 @@ local function updateTargeting(camera: Camera)
 		hud.lockDot.Adornee = targetRoot
 	end
 	hud.lockDot.Enabled = targetRoot ~= nil
-	-- Bigger, fully opaque dot while you hold the Surge (you're the one aiming).
-	local surged = localPlayer:GetAttribute(ATTR.Surged) == true
-	hud.lockDot.Size = if surged then UDim2.fromOffset(22, 22) else UDim2.fromOffset(14, 14)
-	hud.lockDotFill.BackgroundTransparency = if surged then 0 else 0.35
+	-- Big, solid dot when your kick is ready; small and faded while it cools down.
+	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
+	local ready = typeof(readyAt) ~= "number" or serverNow() >= readyAt
+	hud.lockDot.Size = if ready then UDim2.fromOffset(22, 22) else UDim2.fromOffset(14, 14)
+	hud.lockDotFill.BackgroundTransparency = if ready then 0 else 0.45
 end
 
 -- 4. VISUALS: the incoming warning ---------------------------------------------------------
 
 local function updateWarning(t: number)
-	local kick = incoming
+	local kick, count = soonestIncoming()
 	if kick == nil then
 		hud.warning.Visible = false
 		return
 	end
 	hud.warning.Visible = true
+	hud.ringCount.Text = if count > 1 then `x{count}` else ""
 
 	if kick.eta < 0 then
 		-- Lag Switch freeze: the ETA is unknowable, so the ring glitches.
@@ -348,17 +391,28 @@ local function updateWarning(t: number)
 	hud.warningStroke.Transparency = 0.85 - 0.75 * urgency
 end
 
+-- Can we start a kick right now? (The server re-checks all of this.)
+local function canKickNow(t: number): boolean
+	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
+	return localPlayer:GetAttribute(ATTR.InArena) == true
+		and localPlayer:GetAttribute(ATTR.Flying) ~= true
+		and localPlayer:GetAttribute(ATTR.Stunned) ~= true
+		and (typeof(readyAt) ~= "number" or t >= readyAt)
+end
+
 local function updateButtons(t: number)
 	local remaining = math.max(parryLockUntil - t, 0)
 	hud.blockCooldown.Size = UDim2.fromScale(1, math.clamp(remaining / Config.Parry.WhiffCooldown, 0, 1))
 
+	local inArena = localPlayer:GetAttribute(ATTR.InArena) == true
 	local flying = localPlayer:GetAttribute(ATTR.Flying) == true
 	hud.abilityButton.BackgroundTransparency = if flying then 0 else 0.45
 
-	local surged = localPlayer:GetAttribute(ATTR.Surged) == true
-	local stunned = localPlayer:GetAttribute(ATTR.Stunned) == true
-	hud.kickButton.Visible = UserInputService.TouchEnabled and surged and not flying
-	hud.kickButton.BackgroundTransparency = if stunned then 0.55 else 0 -- greyed out while recovering
+	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
+	local kickRemaining = if typeof(readyAt) == "number" then math.max(readyAt - t, 0) else 0
+	hud.kickCooldown.Size = UDim2.fromScale(1, math.clamp(kickRemaining / Config.Kick.Cooldown, 0, 1))
+	local blocked = flying or localPlayer:GetAttribute(ATTR.Stunned) == true
+	hud.kickButton.BackgroundTransparency = if blocked or not inArena then 0.55 else 0
 end
 
 RunService:BindToRenderStep("ClashKickCombat", Enum.RenderPriority.Camera.Value + 1, function()
@@ -370,20 +424,28 @@ RunService:BindToRenderStep("ClashKickCombat", Enum.RenderPriority.Camera.Value 
 	local t = serverNow()
 	updateWarning(t)
 	updateButtons(t)
+	-- Fire a buffered Kick the moment it becomes allowed.
+	if pendingLaunchUntil > 0 and canKickNow(t) then
+		local stillWanted = os.clock() <= pendingLaunchUntil
+		pendingLaunchUntil = 0
+		if stillWanted then
+			requestLaunch()
+		end
+	end
 end)
 
 -- 2 + 3. INPUT -> REMOTES -------------------------------------------------------------------
 
--- Launch: only meaningful while holding the Surge. Sends WHO the dot is on plus the
--- camera, so the server can re-run the same dot-product check.
-local function requestLaunch()
-	if localPlayer:GetAttribute(ATTR.Surged) ~= true or localPlayer:GetAttribute(ATTR.Flying) == true then
+-- Kick: anyone, any time (one kick in the air at a time, short cooldown). Sends WHO
+-- the dot is on plus the camera, so the server can re-run the same dot-product check.
+function requestLaunch()
+	if localPlayer:GetAttribute(ATTR.InArena) ~= true or localPlayer:GetAttribute(ATTR.Flying) == true then
 		return
 	end
-	if localPlayer:GetAttribute(ATTR.Stunned) == true then
-		-- The server refuses launches while you're tumbling or stunned. Instead of
-		-- silently dropping the press, remember it and kick as soon as you recover.
-		pendingLaunch = true
+	if not canKickNow(serverNow()) then
+		-- Stunned, tumbling or cooling down: the server would refuse it. Instead of
+		-- silently dropping the press, buffer it briefly and kick the moment it's allowed.
+		pendingLaunchUntil = os.clock() + LAUNCH_BUFFER
 		return
 	end
 	local camera = Workspace.CurrentCamera
@@ -412,7 +474,7 @@ local function requestParry()
 	if t < parryLockUntil then
 		return -- still in whiff cooldown; the shaded button shows it
 	end
-	local kick = incoming
+	local kick = soonestIncoming() -- the server answers the kick closest to landing too
 	if kick == nil then
 		-- Optimistic mirror of the server's whiff lock; ParryFeedback corrects it either way.
 		parryLockUntil = t + Config.Parry.WhiffCooldown
@@ -459,7 +521,7 @@ onPress(hud.kickButton, requestLaunch)
 
 remotes.KickStarted.OnClientEvent:Connect(function(payload: Types.KickStartedPayload)
 	if payload.targetId == localPlayer.UserId then
-		incoming = {
+		incomingKicks[payload.kickId] = {
 			kickId = payload.kickId,
 			attackerId = payload.attackerId,
 			eta = payload.eta,
@@ -472,17 +534,19 @@ end)
 
 -- Unreliable + possibly out of order: only accept updates newer than what we have.
 remotes.KickUpdated.OnClientEvent:Connect(function(kickId: number, eta: number, sentAt: number)
-	local kick = incoming
-	if kick and kick.kickId == kickId and sentAt >= kick.etaSentAt then
+	local kick = incomingKicks[kickId]
+	if kick and sentAt >= kick.etaSentAt then
 		kick.eta = eta
 		kick.etaSentAt = sentAt
 	end
 end)
 
 remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedPayload)
-	local kick = incoming
-	if kick and kick.kickId == payload.kickId then
-		incoming = nil
+	incomingKicks[payload.kickId] = nil
+
+	-- Head-on: we kicked each other. Each kick resolves separately, so only toast for the one we threw.
+	if payload.outcome == "Clashed" and payload.attackerId == localPlayer.UserId then
+		CombatFX.toast("CLASH!", Color3.fromRGB(255, 230, 160))
 	end
 
 	if payload.outcome == "Hit" and payload.targetId == localPlayer.UserId and payload.lethal then
@@ -530,43 +594,10 @@ remotes.Effect.OnClientEvent:Connect(function(payload: Types.EffectPayload)
 	CombatFX.onEffect(payload)
 end)
 
-localPlayer:GetAttributeChangedSignal(ATTR.Surged):Connect(function()
-	if localPlayer:GetAttribute(ATTR.Surged) ~= true then
-		pendingLaunch = false
-		return
-	end
-	if localPlayer:GetAttribute(ATTR.Flying) == true then
-		return
-	end
-	local recovering = localPlayer:GetAttribute(ATTR.Stunned) == true
-	if HitFeedback.isCardVisible() then
-		-- Just got hit and infected: say it on the card instead of stacking a toast on top of it.
-		HitFeedback.setCardTip(
-			if recovering
-				then "You caught the Surge! Kick someone as soon as you land."
-				else "You caught the Surge! Kick someone now."
-		)
-		return
-	end
-	local kick = if UserInputService.TouchEnabled then "TAP KICK" else "CLICK TO KICK"
-	CombatFX.toast(
-		if recovering then `SURGED! {kick} WHEN YOU LAND` else `SURGED! {kick}!`,
-		Color3.fromRGB(255, 150, 40)
-	)
-end)
-
--- Recovered from a tumble/stun: fire the kick that was pressed during it.
-localPlayer:GetAttributeChangedSignal(ATTR.Stunned):Connect(function()
-	if localPlayer:GetAttribute(ATTR.Stunned) ~= true and pendingLaunch then
-		pendingLaunch = false
-		requestLaunch()
-	end
-end)
-
 localPlayer:GetAttributeChangedSignal(ATTR.InArena):Connect(function()
 	if localPlayer:GetAttribute(ATTR.InArena) ~= true then
-		incoming = nil
+		table.clear(incomingKicks)
 		lockTarget = nil
-		pendingLaunch = false
+		pendingLaunchUntil = 0
 	end
 end)

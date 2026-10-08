@@ -11,7 +11,7 @@ All remotes are declared in one place, [`src/shared/Net.luau`](../src/shared/Net
 4. **Pick the channel by how the data behaves:**
    - *must arrive, once* (a kick started, a parry verdict) → `RemoteEvent` (reliable, ordered)
    - *replaced by the next packet anyway* (the live impact ETA) → `UnreliableRemoteEvent`
-   - *persistent state* (who holds the Surge, who is stunned, round phase) → **Attributes**. They replicate automatically and are already correct for players who join mid-round.
+   - *persistent state* (health, kick cooldown, who is stunned or flying, round phase) → **Attributes**. They replicate automatically and are already correct for players who join mid-round.
 5. **Validate everything.** Every client→server remote is rate-limited (token bucket) and its arguments go through `Guard` (type, NaN/inf, range) before use.
 
 ## Remote catalogue
@@ -20,7 +20,7 @@ All remotes are declared in one place, [`src/shared/Net.luau`](../src/shared/Net
 
 | Remote | Arguments | Rate limit | Server checks |
 |---|---|---|---|
-| `RequestLaunch` | `targetUserId: number, cameraCFrame: CFrame` | 4/s | holds Surge · not flying/stunned/targeted · 0.25 s cooldown · target alive, in range, allowed by the GameMode · camera within `CameraMaxZoomDistance + 12` of the body · target inside a 75° cone of that camera (the same dot product the client used) |
+| `RequestLaunch` | `targetUserId: number, cameraCFrame: CFrame` | 4/s | mode `canLaunch` (no kicks during the spawn countdown) · not already flying · not stunned · kick cooldown over · target alive, in range, allowed by the GameMode `canTarget` · camera within `CameraMaxZoomDistance + 12` of the body · target inside a 75° cone of that camera (the same dot product the client used) |
 | `RequestParry` | `kickId: number, pressServerTime: number, lockUserId: number?` | 6/s | whiff cooldown · a kick is actually incoming · stamp clamped to measured latency · timing window · distance window · integrity heuristics (see below) |
 | `RequestAbility` | — | 2/s | currently flying · equipped style · uses left this round · once per kick |
 | `PingReply` | `nonce: number` | 3/s | nonce must match an outstanding random nonce |
@@ -31,8 +31,8 @@ All remotes are declared in one place, [`src/shared/Net.luau`](../src/shared/Net
 |---|---|---|---|---|
 | `Ping` | RemoteEvent | each player, 1 Hz | `nonce` | RTT probe (see *Latency measurement*) |
 | `KickStarted` | RemoteEvent | all | `KickStartedPayload` (kickId, attacker, target, rally, speed, startedAt, **eta**, perfect) | target shows the red warning; everyone draws trails |
-| `KickUpdated` | **UnreliableRemoteEvent** | all, ≤ 20 Hz | `kickId, eta, sentAt` | keeps the warning ring locked to the server's live ETA. `eta = -1` while frozen (Lag Switch) |
-| `KickResolved` | RemoteEvent | all | `KickResolvedPayload` (outcome `Parried`/`Hit`/`Cancelled`, perfect, direction, position, **rally, speed, damage, health, lethal**) | ends the warning; spark FX and damage numbers; the victim's hit card (who hit you, how much, why) |
+| `KickUpdated` | **UnreliableRemoteEvent** | the kick's target only, ≤ 20 Hz | `kickId, eta, sentAt` | keeps the warning ring locked to the server's live ETA (only the target draws it, so nobody else needs it). `eta = -1` while frozen (Lag Switch) |
+| `KickResolved` | RemoteEvent | all | `KickResolvedPayload` (outcome `Parried`/`Hit`/`Clashed`/`Cancelled`, perfect, direction, position, **rally, speed, damage, health, lethal**) | ends the warning; spark FX and damage numbers; the victim's hit card (who hit you, how much, why) |
 | `ParryFeedback` | RemoteEvent | the presser only | `result, kickId, lockUntil` | "PERFECT!" / "TOO EARLY"; authoritative whiff-cooldown time |
 | `Effect` | RemoteEvent | all | `EffectPayload` | Leg Style visuals (invisibility, decoys, glitch) |
 | `RoundEvent` | RemoteEvent | all | `RoundEventPayload` (incl. `cause`: Kick / Void / Died / Left) | winner banner, KO feed, "knocked off by" card |
@@ -54,7 +54,7 @@ Used only in the lobby. These are never on the combat path, all are rate-limited
 | On | Attribute | Meaning |
 |---|---|---|
 | `Player` | `CK_InArena` | live combatant this round |
-| `Player` | `CK_Surged` | holds the Surge (may launch); drives the aura |
+| `Player` | `CK_KickReadyAt` | server time when this player may kick again (KICK button cooldown shade, lock-on dot size) |
 | `Player` | `CK_Flying` | currently a missile |
 | `Player` | `CK_Stunned` | frozen mid-air after being parried, or tumbling after a hit |
 | `Player` | `CK_Health`, `CK_MaxHealth` | HP while in the arena (drives HUD + overhead health bars); removed when out of the arena |
@@ -113,4 +113,4 @@ An auto-parry script sees exactly what the client sees, so it can always press "
 
 ## Bandwidth
 
-Per active kick: one `KickStarted` (~100 B), at most 20 `KickUpdated`/s (3 numbers, ~30 B each, sent only on drift), and one `KickResolved`. A full 15-player lobby in a fast rally costs about 1 KB/s per client in combat traffic, well inside Roblox's ~50 KB/s budget.
+Per active kick: one `KickStarted` (~100 B) to everyone, at most 20 `KickUpdated`/s (3 numbers, ~30 B each, sent only on drift) to the target alone, and one `KickResolved` to everyone. With everyone kicking, a full 15-player lobby can have ~10 kicks in the air; each client still receives only the ETA stream for kicks aimed at it plus a few start/end events per second, roughly 1-2 KB/s, well inside Roblox's ~50 KB/s budget.

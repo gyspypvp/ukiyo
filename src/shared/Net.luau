@@ -15,7 +15,7 @@
 	     InvokeClient (a client could hang the server thread forever).
 	  3. State that supersedes itself (the live impact ETA) goes over an
 	     UnreliableRemoteEvent: a dropped packet is replaced 50 ms later anyway.
-	  4. Persistent state (phase, who holds the Surge, who is stunned) lives in
+	  4. Persistent state (phase, health, who is stunned or flying) lives in
 	     Attributes, which replicate automatically and are correct for late joiners.
 	  5. Every timestamp is server time (workspace:GetServerTimeNow()).
 ]]
@@ -55,7 +55,7 @@ local Net = {}
 -- Attribute names set by the server on Player objects (persistent, late-join safe).
 Net.Attributes = table.freeze({
 	InArena = "CK_InArena", -- boolean: a live combatant in the current round
-	Surged = "CK_Surged", -- boolean: holds the Surge (may launch)
+	KickReadyAt = "CK_KickReadyAt", -- number: server time when this player may kick again (cooldown UI)
 	Flying = "CK_Flying", -- boolean: currently a human missile
 	Stunned = "CK_Stunned", -- boolean: frozen mid-air after being parried, or tumbling after a hit
 	Health = "CK_Health", -- number: current HP while in the arena

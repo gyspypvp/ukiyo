@@ -5,16 +5,17 @@
 	The contracts that make the game modular. CombatService, RoundManager and
 	every GameMode only talk to each other through these shapes.
 
-	                 +--------------+  CombatRules (canTarget)   +---------------+
+	                 +--------------+  CombatRules (canLaunch,   +---------------+
+	                 |              |   canTarget)               |               |
 	                 |              | -------------------------> |               |
 	                 | RoundManager |                            | CombatService |
 	                 |              | <------------------------- |               |
 	                 +--------------+  Signals (Defeated, ...)   +---------------+
 	                        |  ^                                        ^
-	   lifecycle hooks      v  |  RoundContext (eliminate, alive...)    | CombatApi
-	                 +--------------+                                   |
-	                 |   GameMode   | ----------------------------------+
-	                 | Surge / Jugg.|   grantSurge / clearSurge
+	   lifecycle hooks      v  |  RoundContext (eliminate, alive...)
+	                 +--------------+
+	                 |   GameMode   |   decides who may kick, who may be kicked,
+	                 | Surge / Jugg.|   what a KO means, and how a round is won
 	                 +--------------+
 
 	A new mode (e.g. Juggernaut) is ONE new file implementing GameMode. Neither
@@ -30,14 +31,8 @@ export type DefeatCause = Types.DefeatCause
 
 -- What CombatService asks the active mode before allowing a kick.
 export type CombatRules = {
+	canLaunch: (player: Player) -> boolean, -- may this player start a kick right now? (cooldowns are CombatService's)
 	canTarget: (attacker: Player, target: Player) -> boolean,
-}
-
--- The slice of CombatService a GameMode is allowed to drive.
-export type CombatApi = {
-	grantSurge: (player: Player, rally: number?) -> (),
-	clearSurge: (player: Player) -> (),
-	getSurgeHolders: () -> { Player },
 }
 
 -- Handed to a GameMode by the RoundManager for the lifetime of one round.
@@ -47,7 +42,6 @@ export type RoundContext = {
 	isAlive: (player: Player) -> boolean,
 	isRunning: () -> boolean, -- false once the round has a result or was torn down
 	eliminate: (victim: Player, killer: Player?, cause: DefeatCause?) -> (),
-	combat: CombatApi,
 }
 
 export type RoundResult = {
@@ -65,6 +59,8 @@ export type GameMode = {
 	onRoundEnd: (self: GameMode, ctx: RoundContext) -> (),
 
 	-- Combat hooks ----------------------------------------------------------
+	-- Surge: anyone alive may kick. Juggernaut: only the Juggernaut kicks; runners can only parry.
+	canLaunch: (self: GameMode, ctx: RoundContext, player: Player) -> boolean,
 	canTarget: (self: GameMode, ctx: RoundContext, attacker: Player, target: Player) -> boolean,
 	onDefeated: (self: GameMode, ctx: RoundContext, victim: Player, attacker: Player?, cause: DefeatCause) -> (),
 	-- A kick landed but the victim survived (health > 0 left).

@@ -5,8 +5,8 @@
 	Purely cosmetic, client-side visuals. Nothing here affects gameplay: the
 	server decides every outcome, and this module just draws it.
 
-	  * Surge aura: glow + particles on whoever holds the Surge (attribute-driven)
-	  * Stun glow, kick trails, parry spark, Perfect-parry red aura
+	  * Stun glow (attribute-driven), kick trails, parry and clash sparks,
+	    Perfect-parry red aura, floating damage numbers
 	  * Leg Style effects: Invis-Dash, Shadow Clone decoys, Lag Switch glitch
 	  * Toast text ("PERFECT!", "WHIFF", ...)
 
@@ -30,22 +30,14 @@ local Types = require(Shared:WaitForChild("Types"))
 local ATTR = Net.Attributes
 local localPlayer = Players.LocalPlayer
 
-local SURGE_COLOR = Color3.fromRGB(255, 120, 40)
+local KICK_COLOR = Color3.fromRGB(255, 120, 40)
 local PERFECT_COLOR = Color3.fromRGB(255, 40, 60)
 local STUN_COLOR = Color3.fromRGB(255, 230, 90)
 local SPARK_TEXTURE = "rbxasset://textures/particles/sparkles_main.dds"
 
-type Aura = {
-	highlight: Highlight,
-	emitter: ParticleEmitter,
-	light: PointLight,
-}
-
 local CombatFX = {}
 
-local auras: { [Player]: Aura } = {}
 local stunGlows: { [Player]: Highlight } = {}
-local hiddenPlayers: { [Player]: boolean } = {}
 local cleanups: { [number]: { () -> () } } = {}
 local toastLabel: TextLabel? = nil
 
@@ -127,67 +119,9 @@ local function pulseHighlight(character: Model, color: Color3, duration: number)
 	Debris:AddItem(highlight, duration)
 end
 
--- Surge aura ------------------------------------------------------------------------
-
-local function removeAura(player: Player)
-	local aura = auras[player]
-	if aura then
-		aura.highlight:Destroy()
-		aura.emitter:Destroy()
-		aura.light:Destroy()
-		auras[player] = nil
-	end
-end
-
-local function addAura(player: Player)
-	local character = player.Character
-	local root = rootOf(player)
-	if character == nil or root == nil or auras[player] then
-		return
-	end
-
-	local highlight = Instance.new("Highlight")
-	highlight.FillColor = SURGE_COLOR
-	highlight.OutlineColor = Color3.fromRGB(255, 220, 140)
-	highlight.FillTransparency = 0.55
-	highlight.Adornee = character
-	highlight.Parent = character
-
-	local emitter = Instance.new("ParticleEmitter")
-	emitter.Texture = SPARK_TEXTURE
-	emitter.Color = ColorSequence.new(Color3.fromRGB(255, 200, 80), SURGE_COLOR)
-	emitter.LightEmission = 1
-	emitter.Rate = 45
-	emitter.Lifetime = NumberRange.new(0.3, 0.6)
-	emitter.Speed = NumberRange.new(2, 6)
-	emitter.SpreadAngle = Vector2.new(180, 180)
-	emitter.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.8),
-		NumberSequenceKeypoint.new(1, 0),
-	})
-	emitter.Parent = root
-
-	local light = Instance.new("PointLight")
-	light.Color = SURGE_COLOR
-	light.Range = 12
-	light.Brightness = 2
-	light.Parent = root
-
-	auras[player] = { highlight = highlight, emitter = emitter, light = light }
-	if hiddenPlayers[player] then
-		highlight.Enabled = false
-		emitter.Enabled = false
-		light.Enabled = false
-	end
-end
+-- Stun glow ---------------------------------------------------------------------------
 
 local function refreshPlayer(player: Player)
-	if player:GetAttribute(ATTR.Surged) == true then
-		addAura(player)
-	else
-		removeAura(player)
-	end
-
 	local stunned = player:GetAttribute(ATTR.Stunned) == true
 	local glow: Highlight? = stunGlows[player]
 	if stunned and glow == nil and player.Character then
@@ -204,15 +138,11 @@ local function refreshPlayer(player: Player)
 end
 
 local function watchPlayer(player: Player)
-	player:GetAttributeChangedSignal(ATTR.Surged):Connect(function()
-		refreshPlayer(player)
-	end)
 	player:GetAttributeChangedSignal(ATTR.Stunned):Connect(function()
 		refreshPlayer(player)
 	end)
 	player.CharacterAdded:Connect(function()
-		auras[player] = nil -- old instances died with the old character
-		stunGlows[player] = nil
+		stunGlows[player] = nil -- the old glow died with the old character
 		task.defer(refreshPlayer, player)
 	end)
 	refreshPlayer(player)
@@ -233,17 +163,6 @@ local function setCharacterHidden(player: Player, hidden: boolean)
 		elseif descendant:IsA("Decal") then
 			descendant.LocalTransparencyModifier = modifier -- faces
 		end
-	end
-	if hidden then
-		hiddenPlayers[player] = true
-	else
-		hiddenPlayers[player] = nil
-	end
-	local aura = auras[player]
-	if aura then
-		aura.highlight.Enabled = not hidden
-		aura.emitter.Enabled = not hidden
-		aura.light.Enabled = not hidden
 	end
 end
 
@@ -417,7 +336,7 @@ function CombatFX.onKickStarted(payload: Types.KickStartedPayload)
 	trail.Attachment1 = bottom
 	trail.Lifetime = 0.25
 	trail.LightEmission = 1
-	trail.Color = ColorSequence.new(Color3.fromRGB(255, 200, 80):Lerp(PERFECT_COLOR, heat), SURGE_COLOR)
+	trail.Color = ColorSequence.new(Color3.fromRGB(255, 200, 80):Lerp(PERFECT_COLOR, heat), KICK_COLOR)
 	trail.Transparency = NumberSequence.new(0.1, 1)
 	trail.Parent = root
 	addCleanup(payload.kickId, function()
@@ -468,7 +387,10 @@ function CombatFX.onKickResolved(payload: Types.KickResolvedPayload)
 	CombatFX.cleanupKick(payload.kickId)
 	if payload.outcome == "Parried" then
 		-- The clash: sparks where the feet met the block.
-		burst(payload.position, if payload.perfect then PERFECT_COLOR else SURGE_COLOR, 40, 30)
+		burst(payload.position, if payload.perfect then PERFECT_COLOR else KICK_COLOR, 40, 30)
+	elseif payload.outcome == "Clashed" then
+		-- Two kicks met head-on: a bigger white-hot burst, nobody takes damage.
+		burst(payload.position, Color3.fromRGB(255, 240, 200), 55, 40)
 	elseif payload.outcome == "Hit" then
 		burst(payload.position, Color3.fromRGB(255, 255, 255), 70, 45)
 		damageNumber(payload.position, payload.damage, payload.lethal)
@@ -520,9 +442,7 @@ function CombatFX.init(playerGui: PlayerGui)
 		watchPlayer(player)
 	end
 	Players.PlayerRemoving:Connect(function(player: Player)
-		removeAura(player)
 		stunGlows[player] = nil
-		hiddenPlayers[player] = nil
 	end)
 end
 

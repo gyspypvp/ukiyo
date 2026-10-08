@@ -1,6 +1,6 @@
 # Clash Kick
 
-A high-speed, reaction-based Roblox PvP arena game. It plays like Blade Ball, except **there is no ball: the players are the projectiles.** The Surge holder locks onto an opponent and becomes a feet-first homing missile. The target must Block right before impact to absorb the Surge and ricochet back faster. Each parry adds 10% to the speed. A kick that isn't parried deals damage that scales with that speed: an opening kick chips 25 of your 100 HP, while a 10-parry rally one-shots.
+A high-speed, reaction-based Roblox PvP arena game. It plays like Blade Ball, except **there is no ball: the players are the projectiles.** Anyone can lock onto an opponent at any moment and become a feet-first homing missile, so many kicks can be in the air at once. The target must Block right before impact to ricochet back faster. Each parry in a back-and-forth adds 10% to the speed. A kick that isn't parried deals damage that scales with that speed: an opening kick chips 25 of your 100 HP, while a 10-parry rally one-shots.
 
 This repo holds the foundational, strictly typed Luau codebase for the **Surge (Free-For-All Rally)** mode. It is built so that an asymmetric **Juggernaut (Tagger vs. Lobby)** mode is one extra file.
 
@@ -46,7 +46,7 @@ Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. S
 
 | Action | PC | Gamepad | Mobile |
 |---|---|---|---|
-| Launch (while Surged) | Left click | R2 | **KICK** button (appears while Surged) |
+| Kick (any time; 1.25 s cooldown after landing) | Left click | R2 | **KICK** button |
 | Block / parry | **F** | L1 | **BLOCK** button |
 | Ability (Leg Style, mid-flight) | **Q** | Y | **ABILITY** button |
 | Redirect | aim your camera so the red dot is on someone else, then Block | | |
@@ -55,14 +55,15 @@ Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. S
 
 | Mechanic | Where | How |
 |---|---|---|
-| Surge infection + aura | `SurgeMode`, `CombatService.grantSurge`, `CombatFX` | random survivor; `CK_Surged` attribute drives a Highlight + particles + light on every client |
+| Everyone kicks, everyone blocks | `CombatService`, `SurgeMode.canLaunch` | any survivor may kick at any moment (one kick in the air at a time, `Config.Kick.Cooldown` after it ends); several kicks may chase one player and Block answers the one closest to landing; you can Block mid-flight (the ricochet replaces your kick) |
+| Head-on clash | `CombatService.resolveHeadOn` | two players who kick each other meet in the middle and bounce apart, briefly stunned, with no damage |
 | Camera dot-product lock-on | `Targeting.findBest` | `cos θ = camera.LookVector · unit(target − camera)` must be ≥ cos 28°; best score = alignment − distance·w + sticky bonus; line-of-sight raycast; red BillboardGui dot on the target |
 | Homing feet-first kick | `CombatService.startFlight` / `stepFlight` | server takes network ownership; world-space `LinearVelocity` (∞ force) re-aimed every Heartbeat with a turn-rate-limited slerp; `AlignOrientation` = `lookAt(dir) · Angles(π/2,0,0)` puts the feet forward |
 | Red warning indicator | `CombatController.updateWarning` | ring closes on the **server's ETA** on the synced clock, not on the lagged model |
 | Parry + stun + ricochet | `onParryRequest` → `resolveParry` | attacker blasted back to the ricochet gap and frozen mid-air 0.5 s (LinearVelocity → 0); defender instantly launched at them |
 | Redirect | `resolveRedirect` | the defender's lock-on at press time, if valid and allowed by the mode |
 | +10% per parry | `CombatMath.kickSpeed` | `base · min(1.1^rally, 5) · bonus`, capped at 420 studs/s |
-| HP that scales with speed | `CombatMath.hitDamage`, `CombatService.resolveHit` | 100 HP per round; damage = `round(25 · (speed/75)^1.5)`: opening kick 25, 5-parry rally 51, 10-parry rally 104. A survived hit tumbles you away and passes you the Surge; 0 HP or falling off the arena eliminates you (a fall within 5 s of a hit is credited to the attacker) |
+| HP that scales with speed | `CombatMath.hitDamage`, `CombatService.resolveHit` | 100 HP per round; damage = `round(25 · (speed/75)^1.5)`: opening kick 25, 5-parry rally 51, 10-parry rally 104. A survived hit tumbles you away (and knocks you out of the air if you were mid-kick); 0 HP or falling off the arena eliminates you (a fall within 5 s of a hit is credited to the attacker) |
 | "Who hit me, and why?" | `HitFeedback`, `CombatFX`, `RoundController` | hit card (attacker avatar + name, damage, rally and speed), floating damage numbers, red pulse on your attacker, HUD + overhead health bars, kill-cam on your eliminator, kill feed that says how each player went out |
 | Perfect parry | `CombatMath.parryVerdict` | time-to-impact ≤ 0.10 s → red aura + one-shot 1.2× counter-dash |
 | Distance manipulation | `closingSpeed` + `ricochetGap` | backpedalling slows the incoming ETA **and** widens the ricochet gap (26 → up to 40 studs: a longer counter-dash that buys time); stepping in shrinks it to as little as 12 studs and spikes the opponent |
@@ -77,7 +78,8 @@ Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. S
 These are deliberate calls. Each one is a single number or line in `Config` / the code if you want it different.
 
 - **The ricochet gap is set instantly.** A parried attacker is blasted straight to the gap (raycast-clamped at walls) instead of gliding there, because the counter-dash launches on the same frame and would overtake a glide, making late parries point-blank, unanswerable kills.
-- **A hit you survive passes you the Surge** ("infection", as the design doc calls it) and resets the rally to base speed. Play never stalls, and "I got hit, now I'm it" is obvious. It's one line in `SurgeMode.onDamaged` if you'd rather re-roll a random holder.
+- **No exclusive Surge.** Playtesting showed one-attacker-at-a-time felt restrictive, so anyone can kick at any moment; the only limits are physical (one kick in the air, stunned or tumbling) plus a 1.25 s cooldown. Each fresh kick starts a new rally at base speed. Juggernaut keeps its asymmetry through the mode's `canLaunch` rule.
+- **Blocking is free, whiffing isn't.** You can Block at any moment, but a Block that parries nothing costs a 0.45 s lockout. With many kicks in the air, free spam-blocking would make players unhittable.
 - **Stunned players can still Block.** Stun freezes movement and launching, not parrying. Otherwise any counter-dash arriving within 0.5 s would be an unanswerable kill and the ping-pong could never happen.
 - **The Perfect 1.2× is one-shot.** It boosts that counter-dash only and does not compound into the rally (the +10% does).
 - **"Clash hold" before a hit is confirmed.** On contact the server waits `0.05 s + the defender's latency (≤ 0.25 s)` before declaring a hit, so in-flight parries count. That is lag compensation without rewinding anyone. It reads as a brief clash freeze-frame.

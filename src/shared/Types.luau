@@ -24,7 +24,8 @@ export type KickStartedPayload = {
 	perfect: boolean, -- launched by a Perfect parry (red aura)
 }
 
-export type KickOutcome = "Parried" | "Hit" | "Cancelled"
+-- Clashed: two players kicked EACH OTHER and met head-on; both bounce apart, no damage.
+export type KickOutcome = "Parried" | "Hit" | "Clashed" | "Cancelled"
 
 -- Server -> all clients when a kick ends.
 export type KickResolvedPayload = {

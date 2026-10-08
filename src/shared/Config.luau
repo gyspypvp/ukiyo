@@ -18,11 +18,10 @@ local Config = {}
 -- Round flow ----------------------------------------------------------------
 Config.Round = table.freeze({
 	IntermissionTime = 15, -- seconds in the lobby between matches (upgrade / spin time)
-	SpawnPhaseTime = 4, -- seconds between the arena teleport and the first Surge
+	SpawnPhaseTime = 4, -- seconds between the arena teleport and the fight starting
 	MatchEndTime = 6, -- seconds the "X WINS!" banner stays up
 	MaxPlayers = 15, -- extra players sit the round out in the lobby
 	MaxActiveTime = 540, -- failsafe: no round runs longer (HP rounds take ~2-3x the hits of one-hit KOs)
-	SurgeRespawnDelay = 1.5, -- after a KO, delay before the Surge re-infects someone
 	EliminationReturnDelay = 1.25, -- ragdoll beat before a KO'd player is sent to the lobby
 	ModeRotation = table.freeze({ "Surge" }), -- GameMode names the RoundManager cycles through
 })
@@ -39,8 +38,9 @@ Config.Kick = table.freeze({
 	MaxRange = 260, -- longest legal lock-on / launch distance
 	MaxFlightTime = 8, -- failsafe: a flight older than this is cancelled
 	ClashHoldBase = 0.05, -- minimum "clash frame" before a hit is confirmed
-	AutoLaunchTime = 5, -- a Surge holder who stalls longer than this is auto-launched
-	LaunchCooldown = 0.25, -- minimum gap between two launches by the same player
+	Cooldown = 1.25, -- after your kick ends (hit, parried, clashed), wait this long before kicking again
+	ClashStun = 0.35, -- head-on clash: both kickers bounce apart and hang stunned this long
+	ClashGap = 24, -- head-on clash: studs between the two kickers after the bounce
 	ClosingFloor = 0.25, -- closing speed never drops below this fraction of flight speed
 	EtaBroadcastInterval = 1 / 20, -- KickUpdated cadence (seconds)...
 	EtaBroadcastDrift = 0.015, -- ...or sooner if the ETA moved by more than this
