@@ -1,0 +1,6 @@
+# Rojo / luau-lsp generated
+sourcemap.json
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock

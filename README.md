@@ -1,0 +1,95 @@
+# Clash Kick
+
+A high-speed, reaction-based Roblox PvP arena game. It plays like Blade Ball, except **there is no ball: the players are the projectiles.** The Surge holder locks onto an opponent and becomes a feet-first homing missile. The target must Block right before impact to absorb the Surge and ricochet back faster. Each parry adds 10% to the speed until someone misses.
+
+This repo holds the foundational, strictly typed Luau codebase for the **Surge (Free-For-All Rally)** mode. It is built so that an asymmetric **Juggernaut (Tagger vs. Lobby)** mode is one extra file.
+
+## Where the requested pieces are
+
+| # | Deliverable | Location |
+|---|---|---|
+| 1 | Architecture setup / Explorer layout | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`default.project.json`](default.project.json) |
+| 2 | Client Combat Controller (LocalScript) | [`src/client/CombatController.client.luau`](src/client/CombatController.client.luau) + lock-on math in [`src/shared/Targeting.luau`](src/shared/Targeting.luau) |
+| 3 | Server Combat Module (ModuleScript) | [`src/server/Services/CombatService.luau`](src/server/Services/CombatService.luau) + pure math in [`src/shared/CombatMath.luau`](src/shared/CombatMath.luau) |
+| 4 | Network Bridge | [`docs/NETWORK_BRIDGE.md`](docs/NETWORK_BRIDGE.md) + [`src/shared/Net.luau`](src/shared/Net.luau) |
+
+Also included: the modular `RoundManager` + `GameMode` contract, `SurgeMode`, a draft `JuggernautMode`, latency measurement, the Leg Style abilities, coin upgrades, crates, betting, and client FX.
+
+## Quick start
+
+1. Install [Rojo](https://rojo.space) 7.4+ (the project uses `.luau` files).
+2. `rojo serve` and connect from the Rojo Studio plugin, or `rojo build -o ClashKick.rbxl`.
+3. In your place, tag BaseParts with CollectionService tags:
+   - `CK_ArenaSpawn` on the arena spawn pads
+   - `CK_LobbySpawn` on the lobby spawn pads
+4. Studio → Test → *Clients and Servers* → 2+ players → Start.
+
+Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. Set `Config.Monetization.CrateKeyProductId` to your Developer Product id.
+
+## Controls
+
+| Action | PC | Gamepad | Mobile |
+|---|---|---|---|
+| Launch (while Surged) | Left click | R2 | **KICK** button (appears while Surged) |
+| Block / parry | **F** | L1 | **BLOCK** button |
+| Ability (Leg Style, mid-flight) | **Q** | Y | **ABILITY** button |
+| Redirect | aim your camera so the red dot is on someone else, then Block | | |
+
+## GDD → implementation
+
+| Mechanic | Where | How |
+|---|---|---|
+| Surge infection + aura | `SurgeMode`, `CombatService.grantSurge`, `CombatFX` | random survivor; `CK_Surged` attribute drives a Highlight + particles + light on every client |
+| Camera dot-product lock-on | `Targeting.findBest` | `cos θ = camera.LookVector · unit(target − camera)` must be ≥ cos 28°; best score = alignment − distance·w + sticky bonus; line-of-sight raycast; red BillboardGui dot on the target |
+| Homing feet-first kick | `CombatService.startFlight` / `stepFlight` | server takes network ownership; world-space `LinearVelocity` (∞ force) re-aimed every Heartbeat with a turn-rate-limited slerp; `AlignOrientation` = `lookAt(dir) · Angles(π/2,0,0)` puts the feet forward |
+| Red warning indicator | `CombatController.updateWarning` | ring closes on the **server's ETA** on the synced clock, not on the lagged model |
+| Parry + stun + ricochet | `onParryRequest` → `resolveParry` | attacker blasted back to the ricochet gap and frozen mid-air 0.5 s (LinearVelocity → 0); defender instantly launched at them |
+| Redirect | `resolveRedirect` | the defender's lock-on at press time, if valid and allowed by the mode |
+| +10% per parry | `CombatMath.kickSpeed` | `base · min(1.1^rally, 5) · bonus`, capped at 420 studs/s |
+| Perfect parry | `CombatMath.parryVerdict` | time-to-impact ≤ 0.10 s → red aura + one-shot 1.2× counter-dash |
+| Distance manipulation | `closingSpeed` + `ricochetGap` | backpedalling slows the incoming ETA **and** widens the ricochet gap (26 → up to 40 studs: a longer counter-dash that buys time); stepping in shrinks it to as little as 12 studs and spikes the opponent |
+| Parry validation | `onParryRequest` | latency-clamped stamp, timing window, distance window, whiff cooldown, integrity heuristics (see the network doc) |
+| Upgrades | `UpgradeData`, `PlayerDataService` | WalkSpeed / JumpPower / ParryWindow (+0.05 s max) for Coins |
+| Leg Styles | `AbilityData`, `AbilityService`, `CombatFX` | Lag Switch (freeze 0.5 s → blink), Invis-Dash, Shadow Clone (3 lanes, 1 real hitbox); weighted crate roll |
+| Round loop + Final Duel | `RoundManager`, `RoundController` | Intermission 15 s → Spawning → Active → FinalDuel (FOV 70→84, music swap) → MatchEnd payout |
+| Betting | `BettingService` | eliminated / lobby players bet; odds locked at bet time; closes at the Final Duel |
+
+## Design decisions where the GDD was open
+
+These are deliberate calls. Each one is a single number or line in `Config` / the code if you want it different.
+
+- **The ricochet gap is set instantly.** A parried attacker is blasted straight to the gap (raycast-clamped at walls) instead of gliding there, because the counter-dash launches on the same frame and would overtake a glide, making late parries point-blank, unanswerable kills.
+- **Stunned players can still Block.** Stun freezes movement and launching, not parrying. Otherwise any counter-dash arriving within 0.5 s would be an unanswerable kill and the ping-pong could never happen.
+- **The Perfect 1.2× is one-shot.** It boosts that counter-dash only and does not compound into the rally (the +10% does).
+- **"Clash hold" before a hit is confirmed.** On contact the server waits `0.05 s + the defender's latency (≤ 0.25 s)` before declaring a hit, so in-flight parries count. That is lag compensation without rewinding anyone. It reads as a brief clash freeze-frame.
+- **Lag Switch blinks to *almost* the target,** leaving 0.12 s of flight (`AbilityData.LagSwitch.params.LeadTime`), so a sharp player can still answer it. Set it to 0 for the literal "teleport the remaining distance".
+- **Whiff cooldown (0.45 s) and no pre-pressing.** These weren't in the GDD. They make spamming Block, and naive macros, lose.
+- **Auto-parry heuristics flag, they don't kick** (`Config.Integrity.KickOnFlag = false`) until the thresholds are tuned on real playtest data.
+- **Invisibility and decoys are client-side visuals.** The server hitbox and parry math are unchanged, so no Leg Style can make a kick unparryable or desync.
+
+## Development
+
+The code is `--!strict` throughout and was checked with these tools:
+
+```bash
+# Type-check against the Roblox API (luau-lsp + a Rojo sourcemap)
+rojo sourcemap default.project.json -o sourcemap.json
+luau-lsp analyze --platform=roblox --sourcemap=sourcemap.json \
+  --definitions=@roblox=globalTypes.d.luau src/
+
+# Unit tests for the pure combat math (standalone Luau CLI)
+luau tests/CombatMath.spec.luau
+
+# Formatting
+stylua --check src tests
+```
+
+`globalTypes.d.luau` comes from the [luau-lsp repo](https://github.com/JohnnyMorganz/luau-lsp/tree/main/scripts).
+
+## Not built yet
+
+- Lobby shop / crate / betting **UI** (the server remotes are ready: `GetProfile`, `PurchaseUpgrade`, `SpinCrate`, `EquipLegStyle`, `PlaceBet`)
+- Animations, art assets, sound effects; a spectator camera for eliminated players; AFK toggle
+- Session-locked persistence. `PlayerDataService` uses plain DataStore Get/Set; swap in ProfileStore before launch (the public API stays the same).
+- Playtest tuning of every number in `Config.luau`
+- Juggernaut balance (the mode is a working draft, not in `Config.Round.ModeRotation`)
