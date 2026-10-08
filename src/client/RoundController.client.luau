@@ -163,6 +163,8 @@ remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPaylo
 		banner.Size = UDim2.fromScale(0.75, 0.13)
 		TweenService:Create(banner, TweenInfo.new(0.35, Enum.EasingStyle.Back), { Size = UDim2.fromScale(0.6, 0.1) })
 			:Play()
+	elseif payload.kind == "Draw" then
+		banner.Text = `TIME! {string.upper(payload.displayName or "")} WIN`
 	elseif payload.kind == "NoContest" then
 		banner.Text = "NO CONTEST"
 	elseif payload.kind == "Eliminated" then
@@ -171,7 +173,7 @@ remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPaylo
 		if payload.cause == "Void" then
 			feed.Text = if killer then `{killer} knocked {victim} off the arena` else `{victim} fell off the arena`
 		elseif payload.cause == "Left" then
-			feed.Text = `{victim} left the match`
+			feed.Text = if killer then `{killer} knocked out {victim} (they left)` else `{victim} left the match`
 		elseif killer then
 			feed.Text = `{killer} kicked out {victim}`
 		else

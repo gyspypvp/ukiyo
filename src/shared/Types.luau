@@ -66,7 +66,7 @@ export type EffectPayload = {
 	initialGap: number?, -- ShadowClone: gap at activation (lanes converge as it shrinks)
 }
 
-export type RoundEventKind = "Winner" | "Eliminated" | "NoContest"
+export type RoundEventKind = "Winner" | "Draw" | "Eliminated" | "NoContest"
 
 -- Why a fighter went down. The GameMode decides what each cause means.
 export type DefeatCause = "Kick" | "Void" | "Died" | "Left"
@@ -76,7 +76,7 @@ export type RoundEventPayload = {
 	kind: RoundEventKind,
 	userId: number?,
 	killerId: number?, -- for Void: the last attacker who knocked them off, if recent
-	displayName: string?,
+	displayName: string?, -- Draw: all winners' names joined with " & "
 	cause: DefeatCause?, -- Eliminated only
 }
 

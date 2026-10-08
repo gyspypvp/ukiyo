@@ -299,12 +299,22 @@ local function finishRound(round: Round, ctx: RoundContext, result: RoundResult)
 			PlayerDataService.addCoins(participant, Config.Rewards.Participation)
 		end
 	end
-	BettingService.settle(if #winners == 1 then winners[1] else nil)
+	-- A timeout is decided by visible HP, so a last-second bet on the leader would be
+	-- free money: refund every bet on a timeout, pay out only real last-standing wins.
+	BettingService.settle(if #winners == 1 and result.reason ~= "Timeout" then winners[1] else nil)
 
-	local first = winners[1]
-	local payload: Types.RoundEventPayload = if first
-		then { kind = "Winner", userId = first.UserId, displayName = first.DisplayName }
-		else { kind = "NoContest" }
+	local payload: Types.RoundEventPayload
+	if #winners == 1 then
+		payload = { kind = "Winner", userId = winners[1].UserId, displayName = winners[1].DisplayName }
+	elseif #winners > 1 then
+		local names = {}
+		for _, winner in winners do
+			table.insert(names, winner.DisplayName)
+		end
+		payload = { kind = "Draw", displayName = table.concat(names, " & ") }
+	else
+		payload = { kind = "NoContest" }
+	end
 	net().RoundEvent:FireAllClients(payload)
 
 	countdown("MatchEnd", Config.Round.MatchEndTime)
@@ -436,10 +446,14 @@ function RoundManager.init(netRemotes: Net.Remotes)
 	-- Safety net: a player who leaves is always removed from the alive set,
 	-- even if the mode forgot to eliminate them.
 	Players.PlayerRemoving:Connect(function(player: Player)
+		-- Read the kill credit NOW: if this handler runs before CombatService's,
+		-- the fighter (and who knocked them off) is still tracked. Leaving right
+		-- after being knocked off must still pay the attacker.
+		local credit = CombatService.getRecentAttacker(player)
 		task.defer(function()
 			local round = currentRound
 			if round and round.alive[player] then
-				eliminate(round, player, nil, "Left")
+				eliminate(round, player, credit, "Left")
 			end
 		end)
 	end)

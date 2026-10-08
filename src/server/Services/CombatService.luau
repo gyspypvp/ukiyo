@@ -309,14 +309,16 @@ local function release(fighter: Fighter)
 	-- Stand the body back up (keep position and heading). A flight leaves it
 	-- feet-first and a tumble leaves it toppled; handing a tilted, spinning body
 	-- to the client makes the Humanoid flop around for a second.
+	-- Heading = Up x Right. Flights (feetFirst) and most tumbles only pitch the body
+	-- about its right axis, which stays horizontal, so this is the forward direction
+	-- at ANY pitch (for an upright body it equals the flat LookVector). Using
+	-- LookVector directly would face the body backwards after an upward kick.
 	local cframe = root.CFrame
-	local heading = Vector3.new(cframe.LookVector.X, 0, cframe.LookVector.Z)
+	local heading = Vector3.yAxis:Cross(cframe.RightVector)
+	heading = Vector3.new(heading.X, 0, heading.Z)
 	if heading.Magnitude < 0.2 then
-		local down = -cframe.UpVector -- feet-first: the feet point along the old travel direction
+		local down = -cframe.UpVector -- rolled onto its side: Right is near vertical
 		heading = Vector3.new(down.X, 0, down.Z)
-	end
-	if heading.Magnitude < 1e-3 then
-		heading = Vector3.new(cframe.RightVector.X, 0, cframe.RightVector.Z)
 	end
 	if heading.Magnitude > 1e-3 then
 		-- If the body is lying on the floor, stand it at proper height so the legs don't sink in.
@@ -1432,6 +1434,12 @@ function CombatService.clearSurge(player: Player)
 		fighter.surge = false
 		player:SetAttribute(ATTR.Surged, false)
 	end
+end
+
+-- Who would be credited if this combatant went down right now (see recentAttacker).
+function CombatService.getRecentAttacker(player: Player): Player?
+	local fighter = fighters[player]
+	return if fighter then recentAttacker(fighter) else nil
 end
 
 -- Current HP of a combatant (nil if not in the arena). Used for the round-timeout tiebreak.
