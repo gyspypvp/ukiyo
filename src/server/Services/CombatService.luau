@@ -1244,11 +1244,17 @@ local function resolveUltimate(ult: UltimateState)
 		return
 	end
 
-	-- Land just short of the victim, like a kick's clash frame, not inside their body.
+	-- Land just short of the victim, like a kick's clash frame, not inside their body
+	-- (and not inside cover right behind them: stop in front of it, or stay put).
 	local flat = Vector3.new(ult.direction.X, 0, ult.direction.Z)
 	local back = if flat.Magnitude > 1e-3 then flat.Unit else ult.heading
-	attacker.root.CFrame = CFrame.new(target.root.Position - back * KICK.ImpactRadius * 0.8)
-		* attacker.root.CFrame.Rotation
+	local standOff = -back * KICK.ImpactRadius * 0.8
+	local cover = Workspace:Raycast(target.root.Position, standOff, excludeFighters())
+	local spot = if cover == nil
+		then target.root.Position + standOff
+		elseif cover.Distance > 2.5 then cover.Position + back * 1.5
+		else ult.impactPoint
+	attacker.root.CFrame = CFrame.new(spot) * attacker.root.CFrame.Rotation
 	interrupt(target)
 	local exploded = addStrikes(attacker, target, ULT.Strikes)
 	broadcastUltimateHit(ult, exploded)
@@ -1296,7 +1302,9 @@ local function stepUltimate(ult: UltimateState, t: number, dt: number)
 		-- A stunned or tumbling target (say, a kick just landed on them) can't DASH
 		-- yet. Hang at the apex until they can (capped), so the dive's dodge window
 		-- always starts with them free to move. Clients re-sync to the new dive time.
-		local freeAt = math.min(target.holdUntil, ult.apexHoldUntil)
+		-- (stunUntil, not holdUntil: a target mid-DASH is already dodging and must not
+		-- be waited out and then locked onto where the dash ends.)
+		local freeAt = math.min(target.stunUntil, ult.apexHoldUntil)
 		if target.flight == nil and freeAt > t then
 			mover.velocity.VectorVelocity = Vector3.zero
 			if ult.diveAt ~= freeAt then

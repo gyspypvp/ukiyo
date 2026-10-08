@@ -193,8 +193,11 @@ local function step(dt: number)
 		end
 		local performing = player:GetAttribute(ATTR.Ultimate) == true
 		local leap: Leap? = leaps[player]
-		if leap and t >= leap.diveAt then
-			leaps[player] = nil -- the leap is over (the Dive / Miss / Cancel packet also ends it)
+		-- The Dive / Miss / Cancel packet ends a leap (endLeap). Until it arrives the
+		-- tuck is held, because the server may hang the leap at its apex and re-sync.
+		-- Failsafes: the ULTIMATE is over, or the packet was lost.
+		if leap and ((not performing and t >= leap.diveAt) or t >= leap.diveAt + Config.Ultimate.MaxApexHold + 0.5) then
+			leaps[player] = nil
 			leap = nil
 		end
 		local wanted: Mode? = if leap

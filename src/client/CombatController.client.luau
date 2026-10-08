@@ -114,6 +114,7 @@ local lockTarget: Player? = nil
 local incomingKicks: { [number]: IncomingKick } = {} -- every kick aimed at us, by kick id
 local ultimateThreat: Types.UltimatePayload? = nil -- an ULTIMATE aimed at us (Leap or Dive)
 local parryLockUntil = 0 -- mirror of the server's whiff cooldown (server time)
+local parryLockOptimistic = false -- parryLockUntil is our own guess, not yet confirmed by ParryFeedback
 local duelUntil = 0 -- mirror of the server's duel window: misses cost nothing until then
 local lastParrySent = 0 -- os.clock() of the last Block sent (mash cap)
 local pendingLaunchUntil = 0 -- a buffered Kick fires if it becomes allowed before this (local clock)
@@ -636,6 +637,7 @@ local function requestParry()
 	if kick == nil and not dueling then
 		-- Optimistic mirror of the server's whiff lock; ParryFeedback corrects it either way.
 		parryLockUntil = t + Config.Parry.WhiffCooldown
+		parryLockOptimistic = true
 	end
 	lastParrySent = clock
 	remotes.RequestParry:FireServer(if kick then kick.kickId else 0, t, if lockTarget then lockTarget.UserId else nil)
@@ -765,6 +767,12 @@ remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedP
 		-- a round trip early; a press past the real window just gets a ParryFeedback lock.
 		local margin = math.min(localPlayer:GetNetworkPing() * 2, 0.3)
 		duelUntil = serverNow() + Config.Duel.SpamWindow - margin
+		if parryLockOptimistic then
+			-- A Block pressed just as the duel opened guessed a whiff lock, but the server
+			-- judged it inside the duel (no lock, and so no ParryFeedback to correct us).
+			parryLockUntil = 0
+			parryLockOptimistic = false
+		end
 	end
 
 	-- Head-on: we kicked each other. Each kick resolves separately, so only toast for the one we threw.
@@ -818,6 +826,7 @@ local FEEDBACK_TEXT: { [Types.ParryResult]: { text: string, color: Color3 } } = 
 remotes.ParryFeedback.OnClientEvent:Connect(function(payload: Types.ParryFeedbackPayload)
 	-- The server's lockUntil is authoritative; this also undoes a wrong optimistic lock.
 	parryLockUntil = payload.lockUntil
+	parryLockOptimistic = false
 	local feedback = FEEDBACK_TEXT[payload.result]
 	-- Mid-duel the counter-dash itself is the feedback; a toast per mashed parry is noise.
 	if feedback and feedback.text ~= "" and serverNow() >= duelUntil then
@@ -837,5 +846,6 @@ localPlayer:GetAttributeChangedSignal(ATTR.InArena):Connect(function()
 		pendingLaunchUntil = 0
 		pendingDashUntil = 0
 		duelUntil = 0
+		parryLockOptimistic = false
 	end
 end)

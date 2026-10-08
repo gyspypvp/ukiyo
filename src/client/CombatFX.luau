@@ -196,12 +196,13 @@ local function shakeCamera(origin: Vector3, strength: number, duration: number)
 			RunService:UnbindFromRenderStep(name)
 			return
 		end
-		-- A positional jolt applied after the camera script each frame. Position only:
-		-- the camera module reads back the look direction (never the position), so a
-		-- rotational shake would accumulate into a permanent aim drift.
+		-- A small jolt in the screen plane, applied after the camera script each frame.
+		-- Position only (the camera module reads back the look direction, so a
+		-- rotational shake would accumulate into a permanent aim drift), and never
+		-- along the view axis, so it can't push the camera through the wall that
+		-- occlusion just pulled it in front of.
 		local decay = amplitude * (1 - elapsed / duration)
-		local jolt = Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5)
-		current.CFrame = current.CFrame + jolt * decay
+		current.CFrame = current.CFrame * CFrame.new((math.random() - 0.5) * decay, (math.random() - 0.5) * decay, 0)
 	end)
 end
 
@@ -586,7 +587,7 @@ local function explode(victim: Player?, position: Vector3, color: Color3)
 	Debris:AddItem(emitterPart, 2.2)
 
 	burst(position, color, 90, 60)
-	shakeCamera(position, 1.6, 0.45)
+	shakeCamera(position, 0.8, 0.45)
 
 	local character = victim and victim.Character
 	if victim and character then
