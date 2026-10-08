@@ -64,6 +64,17 @@ Config.Parry = table.freeze({
 	DistanceSlack = 3, -- extra studs tolerated by the parry distance check
 })
 
+-- Health: damage scales with kick speed (CombatMath.hitDamage) -------------------
+Config.Health = table.freeze({
+	MaxHealth = 100, -- everyone starts each round full
+	BaseDamage = 25, -- damage of an opening kick (rally 0, base speed)
+	DamageExponent = 1.5, -- >1 makes long rallies disproportionately deadly (10-parry rally one-shots)
+	HitTumbleTime = 0.7, -- a non-lethal hit sends the victim tumbling; no launching until it ends
+	HitFlingSpeed = 42, -- studs/s along the kick direction during the tumble
+	HitFlingLift = 26, -- studs/s upward during the tumble
+	LastHitCredit = 5, -- seconds: falling off the arena after a hit credits the last attacker
+})
+
 -- Latency / lag compensation ---------------------------------------------------
 Config.Latency = table.freeze({
 	PingInterval = 1, -- seconds between nonce pings
@@ -108,6 +119,7 @@ Config.Movement = table.freeze({
 -- Economy ---------------------------------------------------------------------
 Config.Rewards = table.freeze({
 	CoinsPerKill = 15,
+	CoinsPerHit = 5, -- a non-lethal hit
 	CoinsPerParry = 2,
 	CoinsPerPerfect = 3, -- on top of CoinsPerParry
 	WinPayout = 250, -- "massive" last-player-standing payout

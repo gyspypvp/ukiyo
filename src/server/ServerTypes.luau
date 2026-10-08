@@ -21,9 +21,12 @@
 	the combat physics nor the round state machine needs to change.
 ]]
 
--- Why a fighter went down. The GameMode decides what each cause means
--- (Surge: always elimination; Juggernaut: maybe the tagger has lives).
-export type DefeatCause = "Kick" | "Void" | "Died" | "Left"
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Types = require(ReplicatedStorage.Shared.Types)
+
+-- Why a fighter went down (health hit 0, fell off, died, left). The GameMode
+-- decides what each cause means. Defined in Shared/Types so clients can show it.
+export type DefeatCause = Types.DefeatCause
 
 -- What CombatService asks the active mode before allowing a kick.
 export type CombatRules = {
@@ -43,7 +46,7 @@ export type RoundContext = {
 	getAlive: () -> { Player },
 	isAlive: (player: Player) -> boolean,
 	isRunning: () -> boolean, -- false once the round has a result or was torn down
-	eliminate: (victim: Player, killer: Player?) -> (),
+	eliminate: (victim: Player, killer: Player?, cause: DefeatCause?) -> (),
 	combat: CombatApi,
 }
 
@@ -64,6 +67,15 @@ export type GameMode = {
 	-- Combat hooks ----------------------------------------------------------
 	canTarget: (self: GameMode, ctx: RoundContext, attacker: Player, target: Player) -> boolean,
 	onDefeated: (self: GameMode, ctx: RoundContext, victim: Player, attacker: Player?, cause: DefeatCause) -> (),
+	-- A kick landed but the victim survived (health > 0 left).
+	onDamaged: (
+		self: GameMode,
+		ctx: RoundContext,
+		victim: Player,
+		attacker: Player,
+		damage: number,
+		health: number
+	) -> (),
 	onParried: (self: GameMode, ctx: RoundContext, defender: Player, attacker: Player, perfect: boolean) -> (),
 
 	-- Win conditions --------------------------------------------------------

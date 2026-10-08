@@ -25,8 +25,9 @@
 	              +---------------- "Clash" hold (latency-bounded) ---+
 	              |                                                   |
 	   RequestParry (valid) -> resolveParry                 no parry -> resolveHit
-	     attacker stunned mid-air + knocked back              victim Defeated("Kick")
-	     defender startFlight(rally + 1) ---> (loops)
+	     attacker blasted back + stunned mid-air              damage = f(kick speed)
+	     defender startFlight(rally + 1) ---> (loops)         0 HP  -> Defeated("Kick")
+	                                                          else  -> tumble + Damaged
 ]]
 
 local Players = game:GetService("Players")
@@ -54,6 +55,7 @@ local PlayerDataService = require(script.Parent.PlayerDataService)
 local ATTR = Net.Attributes
 local KICK = Config.Kick
 local PARRY = Config.Parry
+local HEALTH = Config.Health
 
 -- Gap history kept per flight for the parry distance check. At 60 Hz this is
 -- ~1.5 s, far more than the largest lag compensation we ever allow.
@@ -90,6 +92,11 @@ type Fighter = {
 	mover: Mover,
 	connections: { RBXScriptConnection },
 	defeated: boolean,
+
+	-- Health (damage scales with kick speed)
+	health: number,
+	lastHitBy: Player?, -- credited if a hit knocks them off the arena
+	lastHitAt: number,
 
 	-- Surge
 	surge: boolean,
@@ -149,11 +156,13 @@ local CombatService = {}
 
 -- Signals (deferred; see Signal.luau) -------------------------------------------------
 local defeated: Signal.Signal<Player, Player?, DefeatCause> = Signal.new()
+local damaged: Signal.Signal<Player, Player, number, number> = Signal.new()
 local parried: Signal.Signal<Player, Player, boolean, number> = Signal.new()
 local launched: Signal.Signal<Player, Player, number, number> = Signal.new()
 local flagged: Signal.Signal<Player, string> = Signal.new()
 
-CombatService.Defeated = defeated -- (victim, attacker?, cause): the GameMode decides what it means
+CombatService.Defeated = defeated -- (victim, attacker?, cause): health hit 0 / fell / died / left
+CombatService.Damaged = damaged -- (victim, attacker, damage, healthLeft): a kick landed, victim survived
 CombatService.Parried = parried -- (defender, attacker, perfect, rallyCount)
 CombatService.Launched = launched -- (attacker, target, rallyCount, speed)
 CombatService.Flagged = flagged -- (player, reason): integrity heuristics tripped
@@ -332,6 +341,28 @@ local function stun(fighter: Fighter, duration: number, facing: Vector3)
 	mover.align.Enabled = true
 end
 
+--[[
+	TUMBLE: a non-lethal hit sends the victim flying along the kick with real
+	physics (server-owned, gravity on, constraints off) for HitTumbleTime. The
+	victim can't launch until it ends; then stepHolds hands physics back. Near
+	an edge a tumble can carry them off the arena, which is credited to the
+	attacker as a KO (Config.Health.LastHitCredit).
+]]
+local function tumble(fighter: Fighter, direction: Vector3)
+	local t = now()
+	takeOwnership(fighter) -- also PlatformStand: the body goes limp and tumbles
+	fighter.stunUntil = t + HEALTH.HitTumbleTime
+	fighter.holdUntil = t + HEALTH.HitTumbleTime
+	fighter.player:SetAttribute(ATTR.Stunned, true)
+
+	fighter.mover.velocity.Enabled = false
+	fighter.mover.align.Enabled = false
+	local flat = Vector3.new(direction.X, 0, direction.Z)
+	local push = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.zero
+	fighter.root.AssemblyLinearVelocity = push * HEALTH.HitFlingSpeed + Vector3.yAxis * HEALTH.HitFlingLift
+	fighter.root.AssemblyAngularVelocity = push:Cross(Vector3.yAxis) * -6 -- head-over-heels spin
+end
+
 -- The LinearVelocity rig, created once per arena entry and toggled on/off.
 local function createMover(root: BasePart): Mover
 	local attachment = Instance.new("Attachment")
@@ -403,15 +434,23 @@ local function broadcastEta(flight: Flight, t: number, force: boolean?)
 	end
 end
 
-local function broadcastResolved(flight: Flight, outcome: Types.KickOutcome, perfect: boolean)
+-- `damage` is only set for a "Hit". The rally/speed/damage numbers are what the
+-- victim's hit card shows, so "who hit me and why" is always answered.
+local function broadcastResolved(flight: Flight, outcome: Types.KickOutcome, perfect: boolean, damage: number?)
+	local target = flight.target
 	local payload: Types.KickResolvedPayload = {
 		kickId = flight.id,
 		outcome = outcome,
 		attackerId = flight.attacker.player.UserId,
-		targetId = flight.target.player.UserId,
+		targetId = target.player.UserId,
 		perfect = perfect,
 		direction = flight.direction,
 		position = flight.attacker.root.Position,
+		rally = flight.rally,
+		speed = flight.speed,
+		damage = damage or 0,
+		health = target.health,
+		lethal = outcome == "Hit" and target.health <= 0,
 	}
 	net().KickResolved:FireAllClients(payload)
 end
@@ -584,15 +623,33 @@ local function redirectFlight(flight: Flight, newTarget: Fighter)
 	startFlight(flight.attacker, newTarget, flight.rally, false, false)
 end
 
--- No valid parry arrived during the clash window: the kick lands.
+--[[
+	No valid parry arrived during the clash window: the kick lands.
+	Damage scales with the kick's speed (CombatMath.hitDamage), so a fast rally
+	hurts far more than an opening kick. At 0 HP the victim is Defeated;
+	otherwise they tumble away and the GameMode hears about it via Damaged
+	(Surge mode passes the Surge to them).
+]]
 local function resolveHit(flight: Flight)
 	local attacker, target = flight.attacker, flight.target
 	finishFlight(flight)
 	attacker.surge = false -- the Surge is spent; the GameMode decides who gets it next
 	attacker.player:SetAttribute(ATTR.Surged, false)
 	release(attacker)
-	broadcastResolved(flight, "Hit", false)
-	defeat(target, attacker.player, "Kick")
+
+	local damage = CombatMath.hitDamage(flight.speed, KICK.BaseSpeed, HEALTH.BaseDamage, HEALTH.DamageExponent)
+	target.health = math.max(target.health - damage, 0)
+	target.lastHitBy = attacker.player
+	target.lastHitAt = now()
+	target.player:SetAttribute(ATTR.Health, target.health)
+	broadcastResolved(flight, "Hit", false, damage)
+
+	if target.health <= 0 then
+		defeat(target, attacker.player, "Kick")
+	else
+		tumble(target, flight.direction)
+		damaged:Fire(target.player, attacker.player, damage, target.health)
+	end
 end
 
 --[[
@@ -1111,7 +1168,10 @@ local function stepMovement(t: number)
 		end
 		local position = fighter.root.Position
 		if position.Y < settings.KillY then
-			defeat(fighter, nil, "Void")
+			-- Knocked off by a recent hit? Credit the attacker, so the victim sees who did it.
+			local lastHitBy = fighter.lastHitBy
+			local credit = if lastHitBy and t - fighter.lastHitAt <= HEALTH.LastHitCredit then lastHitBy else nil
+			defeat(fighter, credit, "Void")
 			continue
 		end
 		if fighter.serverOwned or t < fighter.releaseGraceUntil then
@@ -1193,6 +1253,9 @@ function CombatService.registerCombatant(player: Player): boolean
 		mover = createMover(root),
 		connections = {},
 		defeated = false,
+		health = HEALTH.MaxHealth,
+		lastHitBy = nil,
+		lastHitAt = 0,
 		surge = false,
 		surgeSince = 0,
 		rally = 0,
@@ -1237,6 +1300,8 @@ function CombatService.registerCombatant(player: Player): boolean
 		end)
 	)
 
+	player:SetAttribute(ATTR.MaxHealth, HEALTH.MaxHealth)
+	player:SetAttribute(ATTR.Health, HEALTH.MaxHealth)
 	player:SetAttribute(ATTR.InArena, true)
 	return true
 end
@@ -1277,6 +1342,8 @@ function CombatService.unregisterCombatant(player: Player)
 	player:SetAttribute(ATTR.Surged, false)
 	player:SetAttribute(ATTR.Flying, false)
 	player:SetAttribute(ATTR.Stunned, false)
+	player:SetAttribute(ATTR.Health, nil) -- health bars only exist in the arena
+	player:SetAttribute(ATTR.MaxHealth, nil)
 	AbilityService.forget(player)
 end
 

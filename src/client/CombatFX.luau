@@ -432,6 +432,38 @@ function CombatFX.onKickStarted(payload: Types.KickStartedPayload)
 	end
 end
 
+-- Floating "-51" over the hit, bigger and redder the harder it hit.
+local function damageNumber(position: Vector3, damage: number, lethal: boolean)
+	local part = effectPart(position + Vector3.new(0, 2, 0))
+	local height = math.clamp(28 + damage * 0.35, 28, 64)
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromOffset(height * 3.5, height)
+	gui.AlwaysOnTop = true
+	gui.LightInfluence = 0
+	gui.Parent = part
+
+	local text = Instance.new("TextLabel")
+	text.Size = UDim2.fromScale(1, 1)
+	text.BackgroundTransparency = 1
+	text.Font = Enum.Font.LuckiestGuy
+	text.TextScaled = true
+	text.Text = if lethal then `-{damage} KO!` else `-{damage}`
+	text.TextColor3 = if lethal
+		then PERFECT_COLOR
+		else Color3.fromRGB(255, 220, 90):Lerp(PERFECT_COLOR, math.clamp(damage / 100, 0, 1))
+	text.Parent = gui
+	local outline = Instance.new("UIStroke")
+	outline.Thickness = 3
+	outline.Color = Color3.fromRGB(40, 0, 0)
+	outline.Parent = text
+
+	TweenService:Create(gui, TweenInfo.new(1, Enum.EasingStyle.Quad), { StudsOffset = Vector3.new(0, 4, 0) }):Play()
+	local fade = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In, 0, false, 0.5)
+	TweenService:Create(text, fade, { TextTransparency = 1 }):Play()
+	TweenService:Create(outline, fade, { Transparency = 1 }):Play()
+	Debris:AddItem(part, 1.1)
+end
+
 function CombatFX.onKickResolved(payload: Types.KickResolvedPayload)
 	CombatFX.cleanupKick(payload.kickId)
 	if payload.outcome == "Parried" then
@@ -439,6 +471,12 @@ function CombatFX.onKickResolved(payload: Types.KickResolvedPayload)
 		burst(payload.position, if payload.perfect then PERFECT_COLOR else SURGE_COLOR, 40, 30)
 	elseif payload.outcome == "Hit" then
 		burst(payload.position, Color3.fromRGB(255, 255, 255), 70, 45)
+		damageNumber(payload.position, payload.damage, payload.lethal)
+		-- If YOU were hit, flash the attacker red: "that's who did it".
+		local attacker = Players:GetPlayerByUserId(payload.attackerId)
+		if payload.targetId == localPlayer.UserId and attacker and attacker.Character then
+			pulseHighlight(attacker.Character, PERFECT_COLOR, 1.5)
+		end
 	end
 end
 

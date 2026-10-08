@@ -1,6 +1,6 @@
 # Clash Kick
 
-A high-speed, reaction-based Roblox PvP arena game. It plays like Blade Ball, except **there is no ball: the players are the projectiles.** The Surge holder locks onto an opponent and becomes a feet-first homing missile. The target must Block right before impact to absorb the Surge and ricochet back faster. Each parry adds 10% to the speed until someone misses.
+A high-speed, reaction-based Roblox PvP arena game. It plays like Blade Ball, except **there is no ball: the players are the projectiles.** The Surge holder locks onto an opponent and becomes a feet-first homing missile. The target must Block right before impact to absorb the Surge and ricochet back faster. Each parry adds 10% to the speed. A kick that isn't parried deals damage that scales with that speed: an opening kick chips 25 of your 100 HP, while a 10-parry rally one-shots.
 
 This repo holds the foundational, strictly typed Luau codebase for the **Surge (Free-For-All Rally)** mode. It is built so that an asymmetric **Juggernaut (Tagger vs. Lobby)** mode is one extra file.
 
@@ -62,6 +62,8 @@ Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. S
 | Parry + stun + ricochet | `onParryRequest` → `resolveParry` | attacker blasted back to the ricochet gap and frozen mid-air 0.5 s (LinearVelocity → 0); defender instantly launched at them |
 | Redirect | `resolveRedirect` | the defender's lock-on at press time, if valid and allowed by the mode |
 | +10% per parry | `CombatMath.kickSpeed` | `base · min(1.1^rally, 5) · bonus`, capped at 420 studs/s |
+| HP that scales with speed | `CombatMath.hitDamage`, `CombatService.resolveHit` | 100 HP per round; damage = `round(25 · (speed/75)^1.5)`: opening kick 25, 5-parry rally 51, 10-parry rally 104. A survived hit tumbles you away and passes you the Surge; 0 HP or falling off the arena eliminates you (a fall within 5 s of a hit is credited to the attacker) |
+| "Who hit me, and why?" | `HitFeedback`, `CombatFX`, `RoundController` | hit card (attacker avatar + name, damage, rally and speed), floating damage numbers, red pulse on your attacker, HUD + overhead health bars, kill-cam on your eliminator, kill feed that says how each player went out |
 | Perfect parry | `CombatMath.parryVerdict` | time-to-impact ≤ 0.10 s → red aura + one-shot 1.2× counter-dash |
 | Distance manipulation | `closingSpeed` + `ricochetGap` | backpedalling slows the incoming ETA **and** widens the ricochet gap (26 → up to 40 studs: a longer counter-dash that buys time); stepping in shrinks it to as little as 12 studs and spikes the opponent |
 | Parry validation | `onParryRequest` | latency-clamped stamp, timing window, distance window, whiff cooldown, integrity heuristics (see the network doc) |
@@ -75,6 +77,7 @@ Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. S
 These are deliberate calls. Each one is a single number or line in `Config` / the code if you want it different.
 
 - **The ricochet gap is set instantly.** A parried attacker is blasted straight to the gap (raycast-clamped at walls) instead of gliding there, because the counter-dash launches on the same frame and would overtake a glide, making late parries point-blank, unanswerable kills.
+- **A hit you survive passes you the Surge** ("infection", as the design doc calls it) and resets the rally to base speed. Play never stalls, and "I got hit, now I'm it" is obvious. It's one line in `SurgeMode.onDamaged` if you'd rather re-roll a random holder.
 - **Stunned players can still Block.** Stun freezes movement and launching, not parrying. Otherwise any counter-dash arriving within 0.5 s would be an unanswerable kill and the ping-pong could never happen.
 - **The Perfect 1.2× is one-shot.** It boosts that counter-dash only and does not compound into the rally (the +10% does).
 - **"Clash hold" before a hit is confirmed.** On contact the server waits `0.05 s + the defender's latency (≤ 0.25 s)` before declaring a hit, so in-flight parries count. That is lag compensation without rewinding anyone. It reads as a brief clash freeze-frame.

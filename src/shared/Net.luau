@@ -57,7 +57,9 @@ Net.Attributes = table.freeze({
 	InArena = "CK_InArena", -- boolean: a live combatant in the current round
 	Surged = "CK_Surged", -- boolean: holds the Surge (may launch)
 	Flying = "CK_Flying", -- boolean: currently a human missile
-	Stunned = "CK_Stunned", -- boolean: frozen mid-air after being parried
+	Stunned = "CK_Stunned", -- boolean: frozen mid-air after being parried, or tumbling after a hit
+	Health = "CK_Health", -- number: current HP while in the arena
+	MaxHealth = "CK_MaxHealth", -- number: HP cap (drives health bars)
 	Flagged = "CK_Flagged", -- string: integrity flag reason (moderation tooling)
 })
 

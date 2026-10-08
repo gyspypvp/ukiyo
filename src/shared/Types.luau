@@ -35,6 +35,12 @@ export type KickResolvedPayload = {
 	perfect: boolean,
 	direction: Vector3, -- flight direction at the end (used for the KO fling / spark)
 	position: Vector3, -- contact point
+	-- Why the hit hurt as much as it did (shown on the victim's hit card):
+	rally: number, -- parries in the rally that produced this kick
+	speed: number, -- studs/s of this kick
+	damage: number, -- HP taken (0 unless outcome == "Hit")
+	health: number, -- target's HP after the kick
+	lethal: boolean, -- this hit eliminated the target
 }
 
 export type ParryResult = "Parry" | "Perfect" | "Early" | "Late" | "NoThreat" | "Cooldown" | "TooFar"
@@ -62,12 +68,16 @@ export type EffectPayload = {
 
 export type RoundEventKind = "Winner" | "Eliminated" | "NoContest"
 
+-- Why a fighter went down. The GameMode decides what each cause means.
+export type DefeatCause = "Kick" | "Void" | "Died" | "Left"
+
 -- Server -> all clients: one-off round announcements (persistent state uses attributes).
 export type RoundEventPayload = {
 	kind: RoundEventKind,
 	userId: number?,
-	killerId: number?,
+	killerId: number?, -- for Void: the last attacker who knocked them off, if recent
 	displayName: string?,
+	cause: DefeatCause?, -- Eliminated only
 }
 
 -- Types-only module: requiring it is free; the table is never used at runtime.

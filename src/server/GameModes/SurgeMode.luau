@@ -6,9 +6,14 @@
 
 	  * Round start: a random survivor is infected with the Surge.
 	  * Anyone may target anyone (camera lock-on decides).
-	  * Every KO (kick, void, death, leaving) is an elimination.
+	  * Everyone has 100 HP; an un-parried kick deals damage that scales with
+	    its speed (CombatService / CombatMath.hitDamage).
+	  * A hit you survive INFECTS you: the Surge passes to the victim and the
+	    rally resets to base speed, so play never stalls and "I got hit, now
+	    I'm it" is obvious.
+	  * 0 HP, falling off the arena, dying or leaving is an elimination.
 	  * When nobody holds the Surge (after a KO), it re-infects a random
-	    survivor after SurgeRespawnDelay, starting a fresh rally at base speed.
+	    survivor after SurgeRespawnDelay.
 	  * Two left: Final Duel. One left: they win.
 
 	Everything here goes through the GameMode contract (ServerTypes); there is
@@ -70,9 +75,24 @@ local SurgeMode: ServerTypes.GameMode = {
 		ctx: RoundContext,
 		victim: Player,
 		attacker: Player?,
-		_cause: ServerTypes.DefeatCause
+		cause: ServerTypes.DefeatCause
 	)
-		ctx.eliminate(victim, attacker)
+		ctx.eliminate(victim, attacker, cause)
+	end,
+
+	-- Infection: the kick passes the Surge to whoever it hit (rally resets).
+	-- They can't launch until their hit tumble ends (CombatService enforces it).
+	onDamaged = function(
+		_self: ServerTypes.GameMode,
+		ctx: RoundContext,
+		victim: Player,
+		_attacker: Player,
+		_damage: number,
+		_health: number
+	)
+		if ctx.isRunning() and ctx.isAlive(victim) and #ctx.combat.getSurgeHolders() == 0 then
+			ctx.combat.grantSurge(victim, 0)
+		end
 	end,
 
 	onParried = function(

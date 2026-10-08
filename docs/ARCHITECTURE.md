@@ -40,7 +40,8 @@ StarterPlayer
 └── StarterPlayerScripts
     └── Client                           (Folder · src/client)
         ├── CombatController  LocalScript    CLIENT COMBAT CONTROLLER: lock-on, input, remotes, warning UI
-        ├── CombatFX          ModuleScript   cosmetic effects (aura, sparks, decoys, invis)
+        ├── CombatFX          ModuleScript   cosmetic effects (aura, sparks, decoys, invis, damage numbers)
+        ├── HitFeedback       ModuleScript   health bars, hit card (who hit you + why), kill-cam
         └── RoundController   LocalScript    phase HUD, Final Duel FOV + music, winner banner
 ```
 
@@ -57,7 +58,7 @@ Only two kinds of top-level code run: one server `Script` (`Main`) and two clien
 | Ability behaviour | `AbilityService` | gets a narrow `FlightControl` handle, never the raw flight |
 | Economy | `PlayerDataService`, `BettingService` | all mutations server-side |
 | Input, lock-on, warning UI | `CombatController` | sends intent only |
-| Cosmetics | `CombatFX`, `RoundController` | never affect gameplay |
+| Cosmetics and hit feedback | `CombatFX`, `HitFeedback`, `RoundController` | never affect gameplay |
 
 ## How modularity works
 
@@ -66,13 +67,14 @@ Only two kinds of top-level code run: one server `Script` (`Main`) and two clien
       ▲   │                                    │
       │   │  RoundContext                      │ Signals (deferred):
       │   ▼  {getAlive, isAlive, eliminate,    │  Defeated(victim, attacker?, cause)
+      │                                        │  Damaged(victim, attacker, damage, hp)
       │   GameMode   combat = CombatApi}       │  Parried(defender, attacker, perfect, rally)
       │   (Surge |          │                  │  Launched, Flagged
       │    Juggernaut)      └─grantSurge/──────▶ CombatService
       └─────────── forwards Defeated/Parried ◀──┘
 ```
 
-- **CombatService never decides who wins or who gets eliminated.** When a kick lands it fires `Defeated(victim, attacker, "Kick")` and stops there. The mode decides what that means: Surge eliminates, a future Juggernaut could spend a life instead.
+- **CombatService never decides who wins or who gets eliminated.** When a kick lands it applies speed-scaled damage. It fires `Damaged(victim, attacker, damage, hp)` if the victim survives, or `Defeated(victim, attacker, "Kick")` at 0 HP, and stops there. The mode decides what each means: Surge passes the Surge to a survivor and eliminates at 0 HP; a future Juggernaut could give the tagger extra HP.
 - **Targeting is a rule, not a hard-code.** Before any launch, redirect or auto-target, CombatService asks `rules.canTarget(attacker, target)`. Surge allows anyone; Juggernaut lets runners hit only the tagger.
 - **Surge ownership is an API.** Modes call `grantSurge` / `clearSurge` / `getSurgeHolders`. Surge re-infects a random survivor after each KO; Juggernaut always returns it to the tagger. Neither needs to know anything about flights.
 - **Signals are deferred.** Handlers run after CombatService finishes its current update, so a mode calling `eliminate()` → `unregisterCombatant()` can never re-enter half-updated combat state.
@@ -95,7 +97,8 @@ Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDue
 
 - **Spawning:** up to 15 eligible players are shuffled onto arena spawns, then `CombatService.registerCombatant` gives each a LinearVelocity rig (disabled) and the `CK_Characters` collision group.
 - **Active:** `mode:onRoundStart` grants the first Surge. The RoundManager ticks `mode:getResult` / `isFinalPhase` / `onTick` every 0.1 s.
-- **KO:** CombatService fires `Defeated` → the mode calls `ctx.eliminate` → combatant unregistered, killer paid, client flings itself (cosmetic) → teleported to the lobby after 1.25 s to spectate and bet.
+- **Hit survived:** damage applied, victim tumbles for 0.7 s (server-owned physics), attacker paid `CoinsPerHit`, mode `onDamaged` (Surge: the victim catches the Surge).
+- **KO (0 HP, knocked off, died, left):** CombatService fires `Defeated` → the mode calls `ctx.eliminate(victim, killer, cause)` → combatant unregistered, killer paid, client flings itself (cosmetic), kill-cam on the killer → teleported to the lobby after 1.25 s to spectate and bet.
 - **MatchEnd:** winner payout, participation coins, bets settled (refunded if there's no single winner), survivors return to the lobby.
 - A crash inside a round is caught (`xpcall`), combat is reset, and the loop continues.
 

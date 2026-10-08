@@ -32,10 +32,10 @@ All remotes are declared in one place, [`src/shared/Net.luau`](../src/shared/Net
 | `Ping` | RemoteEvent | each player, 1 Hz | `nonce` | RTT probe (see *Latency measurement*) |
 | `KickStarted` | RemoteEvent | all | `KickStartedPayload` (kickId, attacker, target, rally, speed, startedAt, **eta**, perfect) | target shows the red warning; everyone draws trails |
 | `KickUpdated` | **UnreliableRemoteEvent** | all, ≤ 20 Hz | `kickId, eta, sentAt` | keeps the warning ring locked to the server's live ETA. `eta = -1` while frozen (Lag Switch) |
-| `KickResolved` | RemoteEvent | all | `KickResolvedPayload` (outcome `Parried`/`Hit`/`Cancelled`, perfect, direction, position) | ends the warning, spark FX, KO fling |
+| `KickResolved` | RemoteEvent | all | `KickResolvedPayload` (outcome `Parried`/`Hit`/`Cancelled`, perfect, direction, position, **rally, speed, damage, health, lethal**) | ends the warning; spark FX and damage numbers; the victim's hit card (who hit you, how much, why) |
 | `ParryFeedback` | RemoteEvent | the presser only | `result, kickId, lockUntil` | "PERFECT!" / "TOO EARLY"; authoritative whiff-cooldown time |
 | `Effect` | RemoteEvent | all | `EffectPayload` | Leg Style visuals (invisibility, decoys, glitch) |
-| `RoundEvent` | RemoteEvent | all | `RoundEventPayload` | winner banner, KO feed |
+| `RoundEvent` | RemoteEvent | all | `RoundEventPayload` (incl. `cause`: Kick / Void / Died / Left) | winner banner, KO feed, "knocked off by" card |
 
 ### Client → Server: lobby (`RemoteFunction`, request/response)
 
@@ -56,7 +56,8 @@ Used only in the lobby. These are never on the combat path, all are rate-limited
 | `Player` | `CK_InArena` | live combatant this round |
 | `Player` | `CK_Surged` | holds the Surge (may launch); drives the aura |
 | `Player` | `CK_Flying` | currently a missile |
-| `Player` | `CK_Stunned` | frozen mid-air after being parried |
+| `Player` | `CK_Stunned` | frozen mid-air after being parried, or tumbling after a hit |
+| `Player` | `CK_Health`, `CK_MaxHealth` | HP while in the arena (drives HUD + overhead health bars); removed when out of the arena |
 | `Player` | `CK_Flagged` | integrity heuristic tripped (for moderation tooling) |
 | `ReplicatedStorage.ClashKickState` | `Phase`, `PhaseEndsAt`, `Mode`, `AliveCount`, `RoundId` | round state machine; `PhaseEndsAt` is server time |
 

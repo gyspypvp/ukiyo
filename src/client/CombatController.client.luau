@@ -36,6 +36,7 @@ local Net = require(Shared:WaitForChild("Net"))
 local Targeting = require(Shared:WaitForChild("Targeting"))
 local Types = require(Shared:WaitForChild("Types"))
 local CombatFX = require(script.Parent:WaitForChild("CombatFX"))
+local HitFeedback = require(script.Parent:WaitForChild("HitFeedback"))
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui") :: PlayerGui
@@ -257,6 +258,7 @@ local function buildHud(): Hud
 end
 
 CombatFX.init(playerGui)
+HitFeedback.init(playerGui)
 local hud = buildHud()
 
 -- 1. TARGETING ----------------------------------------------------------------------------
@@ -473,9 +475,10 @@ remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedP
 		incoming = nil
 	end
 
-	if payload.outcome == "Hit" and payload.targetId == localPlayer.UserId then
+	if payload.outcome == "Hit" and payload.targetId == localPlayer.UserId and payload.lethal then
 		-- Cosmetic KO fling. We own our character's physics, so we launch ourselves;
 		-- the server has already eliminated us and will teleport us to the lobby.
+		-- (A hit you survive is a server-side tumble instead.)
 		local root = rootOf(localPlayer)
 		local character = localPlayer.Character
 		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -484,10 +487,14 @@ remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedP
 			local fling = Config.Kick.HitFlingSpeed
 			root.AssemblyLinearVelocity = payload.direction * fling + Vector3.new(0, fling * 0.6, 0)
 		end
-		CombatFX.toast("KNOCKED OUT", Color3.fromRGB(255, 70, 70))
 	end
 
 	CombatFX.onKickResolved(payload)
+	HitFeedback.onKickResolved(payload) -- hit card: who hit you, how much, why
+end)
+
+remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPayload)
+	HitFeedback.onRoundEvent(payload) -- e.g. "KNOCKED OFF BY ..." cards
 end)
 
 local FEEDBACK_TEXT: { [Types.ParryResult]: { text: string, color: Color3 } } = {

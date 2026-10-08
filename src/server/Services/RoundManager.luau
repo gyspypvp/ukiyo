@@ -149,7 +149,7 @@ end
 
 -- Round context (what a GameMode is allowed to do) -----------------------------------------------
 
-local function eliminate(round: Round, victim: Player, killer: Player?)
+local function eliminate(round: Round, victim: Player, killer: Player?, cause: ServerTypes.DefeatCause?)
 	if not round.alive[victim] then
 		return
 	end
@@ -167,6 +167,7 @@ local function eliminate(round: Round, victim: Player, killer: Player?)
 		userId = victim.UserId,
 		killerId = if killer then killer.UserId else nil,
 		displayName = victim.DisplayName,
+		cause = cause,
 	}
 	net().RoundEvent:FireAllClients(payload)
 
@@ -195,8 +196,8 @@ local function makeContext(round: Round): RoundContext
 		isRunning = function(): boolean
 			return round.running and currentRound == round
 		end,
-		eliminate = function(victim: Player, killer: Player?)
-			eliminate(round, victim, killer)
+		eliminate = function(victim: Player, killer: Player?, cause: ServerTypes.DefeatCause?)
+			eliminate(round, victim, killer, cause)
 		end,
 		combat = {
 			grantSurge = CombatService.grantSurge,
@@ -400,6 +401,18 @@ function RoundManager.init(netRemotes: Net.Remotes)
 		end
 	end)
 
+	-- A kick landed but the victim survived: pay the attacker, let the mode react.
+	CombatService.Damaged:Connect(function(victim: Player, attacker: Player, damage: number, health: number)
+		local round, ctx = currentRound, currentContext
+		if round == nil or ctx == nil or not round.running or not round.alive[victim] then
+			return
+		end
+		if attacker.Parent then
+			PlayerDataService.addCoins(attacker, Config.Rewards.CoinsPerHit)
+		end
+		round.mode:onDamaged(ctx, victim, attacker, damage, health)
+	end)
+
 	-- Combat -> economy + mode
 	CombatService.Parried:Connect(function(defender: Player, attacker: Player, perfect: boolean, _rally: number)
 		local round, ctx = currentRound, currentContext
@@ -417,7 +430,7 @@ function RoundManager.init(netRemotes: Net.Remotes)
 		task.defer(function()
 			local round = currentRound
 			if round and round.alive[player] then
-				eliminate(round, player, nil)
+				eliminate(round, player, nil, "Left")
 			end
 		end)
 	end)

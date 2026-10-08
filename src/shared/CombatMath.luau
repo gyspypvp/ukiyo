@@ -57,6 +57,23 @@ function CombatMath.kickSpeed(params: SpeedParams, rallyCount: number, bonus: nu
 end
 
 --[[
+	DAMAGE SCALES WITH SPEED
+	An un-parried kick deals damage based on how fast it was flying:
+
+	    damage = round(baseDamage * (speed / baseSpeed) ^ exponent), at least 1
+
+	With baseDamage 25 and exponent 1.5, an opening kick chips 25 HP, a 5-parry
+	rally hits ~50 and a 10-parry rally one-shots a full 100 HP bar. The exponent
+	makes long rallies disproportionately deadly, so the escalation stays tense
+	and "why did that kill me?" always has the same answer: the rally got fast.
+	Returned as an integer so health bars never show fractions.
+]]
+function CombatMath.hitDamage(speed: number, baseSpeed: number, baseDamage: number, exponent: number): number
+	local ratio = math.max(speed, 0) / math.max(baseSpeed, 1e-3)
+	return math.max(1, math.floor(baseDamage * ratio ^ exponent + 0.5))
+end
+
+--[[
 	How fast the gap between kicker and target is shrinking.
 
 	`targetRecedeSpeed` is the target's velocity along the flight direction

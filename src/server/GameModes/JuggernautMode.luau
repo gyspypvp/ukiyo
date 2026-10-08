@@ -74,10 +74,21 @@ local JuggernautMode: ServerTypes.GameMode = {
 		ctx: RoundContext,
 		victim: Player,
 		attacker: Player?,
-		_cause: ServerTypes.DefeatCause
+		cause: ServerTypes.DefeatCause
 	)
-		-- Future: give the Juggernaut extra lives here instead of eliminating.
-		ctx.eliminate(victim, attacker)
+		ctx.eliminate(victim, attacker, cause)
+	end,
+
+	-- The Surge always returns to the Juggernaut (onTick), so a survived hit
+	-- needs no extra handling. Future: give the Juggernaut more HP instead.
+	onDamaged = function(
+		_self: ServerTypes.GameMode,
+		_ctx: RoundContext,
+		_victim: Player,
+		_attacker: Player,
+		_damage: number,
+		_health: number
+	)
 	end,
 
 	onParried = function(

@@ -167,9 +167,16 @@ remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPaylo
 		banner.Text = "NO CONTEST"
 	elseif payload.kind == "Eliminated" then
 		local victim = nameOf(payload.userId, payload.displayName)
-		feed.Text = if payload.killerId
-			then `{nameOf(payload.killerId, nil)} kicked out {victim}`
-			else `{victim} was knocked out`
+		local killer = if payload.killerId then nameOf(payload.killerId, nil) else nil
+		if payload.cause == "Void" then
+			feed.Text = if killer then `{killer} knocked {victim} off the arena` else `{victim} fell off the arena`
+		elseif payload.cause == "Left" then
+			feed.Text = `{victim} left the match`
+		elseif killer then
+			feed.Text = `{killer} kicked out {victim}`
+		else
+			feed.Text = `{victim} was knocked out`
+		end
 		feed.TextTransparency = 0
 		TweenService:Create(feed, TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.In, 0, false, 2), {
 			TextTransparency = 1,

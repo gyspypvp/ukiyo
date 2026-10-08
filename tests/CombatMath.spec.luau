@@ -75,6 +75,37 @@ test("negative rally counts are treated as zero", function()
 	near(CombatMath.kickSpeed(SPEED, -3, 1), 75)
 end)
 
+-- Damage scales with speed ----------------------------------------------------------------------
+
+local function damageAtRally(rally: number, bonus: number): number
+	return CombatMath.hitDamage(CombatMath.kickSpeed(SPEED, rally, bonus), 75, 25, 1.5)
+end
+
+test("an opening kick chips 25 HP", function()
+	equal(damageAtRally(0, 1), 25)
+end)
+
+test("damage ramps up as the rally speeds up", function()
+	equal(damageAtRally(5, 1), 51)
+	equal(damageAtRally(9, 1), 91)
+end)
+
+test("a 10-parry rally one-shots a full 100 HP bar (8 if the last parry was Perfect)", function()
+	equal(damageAtRally(10, 1), 104)
+	equal(damageAtRally(8, 1.2), 103)
+	equal(damageAtRally(7, 1.2), 89)
+end)
+
+test("a Perfect counter-dash hits harder than a normal one", function()
+	equal(damageAtRally(3, 1), 38)
+	equal(damageAtRally(3, 1.2), 50)
+end)
+
+test("damage is a whole number and never below 1", function()
+	equal(CombatMath.hitDamage(80, 75, 25, 1.5), 28)
+	equal(CombatMath.hitDamage(0, 75, 25, 1.5), 1)
+end)
+
 -- Closing speed / time to impact ---------------------------------------------------------------
 
 test("backpedalling slows the closing speed (buys time)", function()
