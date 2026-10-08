@@ -32,7 +32,7 @@ export type KickResolvedPayload = {
 	outcome: KickOutcome,
 	attackerId: number,
 	targetId: number,
-	perfect: boolean,
+	perfect: boolean, -- Parried: the parry was Perfect. Hit: the kick was a Perfect counter-dash (hits harder)
 	direction: Vector3, -- flight direction at the end (used for the KO fling / spark)
 	position: Vector3, -- contact point
 	-- Why the hit hurt as much as it did (shown on the victim's hit card):

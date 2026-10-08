@@ -3,11 +3,16 @@
 	BettingService (ModuleScript, server)
 	=====================================
 	Eliminated players (and lobby spectators) bet Coins on who will win the
-	current round. Odds are locked when the bet is placed:
+	current round. Odds are locked when the bet is placed and priced by the
+	target's share of the arena's remaining HP (HP is public, so flat odds
+	would make backing the healthiest fighter free money):
 
-	    multiplier = max(MinBetMultiplier, aliveAtBet * BetHouseEdge)
+	    multiplier = clamp(BetHouseEdge * totalAliveHP / targetHP,
+	                       MinBetMultiplier, aliveAtBet * BetHouseEdge)
 
-	so an early bet on a crowded arena pays a lot, and a late bet pays little.
+	With everyone at full HP that is aliveAtBet * BetHouseEdge: an early bet on a
+	crowded arena pays a lot. A healthy favourite pays less, and an underdog's
+	payout never exceeds the crowded-arena maximum.
 	Betting closes at the Final Duel (2 alive) so nobody can farm near-certain
 	outcomes. Coins are taken up front; a round with no single winner refunds.
 ]]
@@ -33,12 +38,12 @@ local BettingService = {}
 local bets: { [Player]: Bet } = {}
 local isOpen = false
 local isAliveFn: ((Player) -> boolean)? = nil
-local aliveCountFn: (() -> number)? = nil
+local getAliveFn: (() -> { Player })? = nil
 local limiter = RateLimiter.new(Config.RateLimits.Lobby.rate, Config.RateLimits.Lobby.burst)
 
 local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown): (boolean, string)
-	local isAlive, aliveCount = isAliveFn, aliveCountFn
-	if not isOpen or isAlive == nil or aliveCount == nil then
+	local isAlive, getAlive = isAliveFn, getAliveFn
+	if not isOpen or isAlive == nil or getAlive == nil then
 		return false, "Betting is closed"
 	end
 	if isAlive(player) then
@@ -55,7 +60,8 @@ local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown
 	if amount == nil then
 		return false, "Invalid amount"
 	end
-	local alive = aliveCount()
+	local alivePlayers = getAlive()
+	local alive = #alivePlayers
 	if alive <= 2 then
 		return false, "Betting closes at the Final Duel"
 	end
@@ -63,16 +69,30 @@ local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown
 		return false, "Not enough coins"
 	end
 
-	local multiplier = math.max(Config.Rewards.MinBetMultiplier, alive * Config.Rewards.BetHouseEdge)
+	-- HP comes from the server-set attribute, so it can be trusted here.
+	local function healthOf(player: Player): number
+		local health = player:GetAttribute(Net.Attributes.Health)
+		return if typeof(health) == "number" then math.max(health, 1) else Config.Health.MaxHealth
+	end
+	local totalHealth = 0
+	for _, player in alivePlayers do
+		totalHealth += healthOf(player)
+	end
+	local edge = Config.Rewards.BetHouseEdge
+	local multiplier = math.clamp(
+		edge * totalHealth / healthOf(target),
+		Config.Rewards.MinBetMultiplier,
+		math.max(alive * edge, Config.Rewards.MinBetMultiplier)
+	)
 	bets[player] = { targetId = target.UserId, amount = amount, multiplier = multiplier }
 	return true, string.format("Bet %d on %s at x%.1f", amount, target.DisplayName, multiplier)
 end
 
 -- Called by the RoundManager when a round goes live.
-function BettingService.openRound(isAlive: (Player) -> boolean, aliveCount: () -> number)
+function BettingService.openRound(isAlive: (Player) -> boolean, getAlive: () -> { Player })
 	table.clear(bets)
 	isAliveFn = isAlive
-	aliveCountFn = aliveCount
+	getAliveFn = getAlive
 	isOpen = true
 end
 

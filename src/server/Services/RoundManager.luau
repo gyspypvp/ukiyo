@@ -257,7 +257,18 @@ local function runActive(round: Round, ctx: RoundContext): RoundResult
 			return result
 		end
 		if now() - startedAt > Config.Round.MaxActiveTime then
-			return { winners = {}, reason = "Timeout" }
+			-- Out of time: the healthiest survivor(s) win, rather than a NO CONTEST that
+			-- erases a long round. An exact tie shares the payout (and refunds bets).
+			local best, winners = -1, {}
+			for _, player in ctx.getAlive() do
+				local health = CombatService.getHealth(player) or 0
+				if health > best then
+					best, winners = health, { player }
+				elseif health == best then
+					table.insert(winners, player)
+				end
+			end
+			return { winners = winners, reason = "Timeout" }
 		end
 		if phase == "Active" and round.mode:isFinalPhase(ctx) then
 			setPhase("FinalDuel") -- clients shift FOV + swap music on this attribute
@@ -360,9 +371,7 @@ local function runRound()
 	Net.stateFolder():SetAttribute(STATE.RoundId, round.id)
 	publishAliveCount(round)
 	AbilityService.resetRound()
-	BettingService.openRound(ctx.isAlive, function(): number
-		return countAlive(round)
-	end)
+	BettingService.openRound(ctx.isAlive, ctx.getAlive)
 	CombatService.setRules({
 		canTarget = function(attacker: Player, target: Player): boolean
 			return round.alive[attacker] == true

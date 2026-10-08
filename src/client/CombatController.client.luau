@@ -82,6 +82,7 @@ type Hud = {
 local lockTarget: Player? = nil
 local incoming: IncomingKick? = nil
 local parryLockUntil = 0 -- mirror of the server's whiff cooldown (server time)
+local pendingLaunch = false -- Kick pressed while still tumbling/stunned: fire it the moment we recover
 
 local losParams = RaycastParams.new()
 losParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -355,7 +356,9 @@ local function updateButtons(t: number)
 	hud.abilityButton.BackgroundTransparency = if flying then 0 else 0.45
 
 	local surged = localPlayer:GetAttribute(ATTR.Surged) == true
+	local stunned = localPlayer:GetAttribute(ATTR.Stunned) == true
 	hud.kickButton.Visible = UserInputService.TouchEnabled and surged and not flying
+	hud.kickButton.BackgroundTransparency = if stunned then 0.55 else 0 -- greyed out while recovering
 end
 
 RunService:BindToRenderStep("ClashKickCombat", Enum.RenderPriority.Camera.Value + 1, function()
@@ -375,6 +378,12 @@ end)
 -- camera, so the server can re-run the same dot-product check.
 local function requestLaunch()
 	if localPlayer:GetAttribute(ATTR.Surged) ~= true or localPlayer:GetAttribute(ATTR.Flying) == true then
+		return
+	end
+	if localPlayer:GetAttribute(ATTR.Stunned) == true then
+		-- The server refuses launches while you're tumbling or stunned. Instead of
+		-- silently dropping the press, remember it and kick as soon as you recover.
+		pendingLaunch = true
 		return
 	end
 	local camera = Workspace.CurrentCamera
@@ -456,6 +465,7 @@ remotes.KickStarted.OnClientEvent:Connect(function(payload: Types.KickStartedPay
 			eta = payload.eta,
 			etaSentAt = payload.startedAt,
 		}
+		HitFeedback.hideCard() -- never let the last hit's card cover the parry ring
 	end
 	CombatFX.onKickStarted(payload)
 end)
@@ -521,9 +531,35 @@ remotes.Effect.OnClientEvent:Connect(function(payload: Types.EffectPayload)
 end)
 
 localPlayer:GetAttributeChangedSignal(ATTR.Surged):Connect(function()
-	if localPlayer:GetAttribute(ATTR.Surged) == true and localPlayer:GetAttribute(ATTR.Flying) ~= true then
-		local hint = if UserInputService.TouchEnabled then "TAP KICK!" else "CLICK TO KICK!"
-		CombatFX.toast(`SURGED! {hint}`, Color3.fromRGB(255, 150, 40))
+	if localPlayer:GetAttribute(ATTR.Surged) ~= true then
+		pendingLaunch = false
+		return
+	end
+	if localPlayer:GetAttribute(ATTR.Flying) == true then
+		return
+	end
+	local recovering = localPlayer:GetAttribute(ATTR.Stunned) == true
+	if HitFeedback.isCardVisible() then
+		-- Just got hit and infected: say it on the card instead of stacking a toast on top of it.
+		HitFeedback.setCardTip(
+			if recovering
+				then "You caught the Surge! Kick someone as soon as you land."
+				else "You caught the Surge! Kick someone now."
+		)
+		return
+	end
+	local kick = if UserInputService.TouchEnabled then "TAP KICK" else "CLICK TO KICK"
+	CombatFX.toast(
+		if recovering then `SURGED! {kick} WHEN YOU LAND` else `SURGED! {kick}!`,
+		Color3.fromRGB(255, 150, 40)
+	)
+end)
+
+-- Recovered from a tumble/stun: fire the kick that was pressed during it.
+localPlayer:GetAttributeChangedSignal(ATTR.Stunned):Connect(function()
+	if localPlayer:GetAttribute(ATTR.Stunned) ~= true and pendingLaunch then
+		pendingLaunch = false
+		requestLaunch()
 	end
 end)
 
@@ -531,5 +567,6 @@ localPlayer:GetAttributeChangedSignal(ATTR.InArena):Connect(function()
 	if localPlayer:GetAttribute(ATTR.InArena) ~= true then
 		incoming = nil
 		lockTarget = nil
+		pendingLaunch = false
 	end
 end)

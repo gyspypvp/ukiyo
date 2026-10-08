@@ -304,8 +304,41 @@ local function release(fighter: Fighter)
 		return
 	end
 	fighter.serverOwned = false
-	-- Zero residual velocity so the client can't inherit a 400 stud/s fling.
-	fighter.root.AssemblyLinearVelocity = Vector3.zero
+	local root = fighter.root
+
+	-- Stand the body back up (keep position and heading). A flight leaves it
+	-- feet-first and a tumble leaves it toppled; handing a tilted, spinning body
+	-- to the client makes the Humanoid flop around for a second.
+	local cframe = root.CFrame
+	local heading = Vector3.new(cframe.LookVector.X, 0, cframe.LookVector.Z)
+	if heading.Magnitude < 0.2 then
+		local down = -cframe.UpVector -- feet-first: the feet point along the old travel direction
+		heading = Vector3.new(down.X, 0, down.Z)
+	end
+	if heading.Magnitude < 1e-3 then
+		heading = Vector3.new(cframe.RightVector.X, 0, cframe.RightVector.Z)
+	end
+	if heading.Magnitude > 1e-3 then
+		-- If the body is lying on the floor, stand it at proper height so the legs don't sink in.
+		local position = root.Position
+		local humanoid = fighter.humanoid
+		local legs = if humanoid.RigType == Enum.HumanoidRigType.R6 then 2 else humanoid.HipHeight
+		local standHeight = legs + root.Size.Y / 2
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { fighter.character }
+		local floor = Workspace:Raycast(position, Vector3.new(0, -(standHeight + 0.5), 0), params)
+		if floor then
+			position = Vector3.new(position.X, floor.Position.Y + standHeight, position.Z)
+		end
+		root.CFrame = CFrame.lookAt(position, position + heading.Unit)
+	end
+
+	-- No spin, no horizontal or upward momentum (the client can't inherit a 400
+	-- stud/s fling), but keep any downward speed so a mid-air release keeps falling
+	-- instead of stopping dead.
+	root.AssemblyAngularVelocity = Vector3.zero
+	root.AssemblyLinearVelocity = Vector3.new(0, math.min(root.AssemblyLinearVelocity.Y, 0), 0)
 	fighter.humanoid.PlatformStand = false
 	setCollisionGroup(fighter.character, Config.CollisionGroups.Characters)
 	if fighter.root:IsDescendantOf(Workspace) then
@@ -474,6 +507,21 @@ local function defeat(fighter: Fighter, attacker: Player?, cause: DefeatCause)
 	defeated:Fire(fighter.player, attacker, cause)
 end
 
+--[[
+	Who should be credited if this fighter goes down without a lethal kick
+	(knocked off the arena, then fell, reset or left)? Whoever last displaced
+	them (a hit tumble or a parry blast) within LastHitCredit seconds. It's
+	cleared as soon as the fighter launches again, so an old hit never gets
+	credit for a fall the fighter caused themselves.
+]]
+local function recentAttacker(fighter: Fighter): Player?
+	local by = fighter.lastHitBy
+	if by and now() - fighter.lastHitAt <= HEALTH.LastHitCredit then
+		return by
+	end
+	return nil
+end
+
 -- Targets ----------------------------------------------------------------------------
 
 local function isEligibleTarget(attacker: Fighter, target: Fighter): boolean
@@ -555,6 +603,7 @@ local function startFlight(
 	-- A counter-dash launched from mid-air supersedes the stun hover.
 	attacker.stunUntil = 0
 	attacker.holdUntil = 0
+	attacker.lastHitBy = nil -- acting again: an old hit no longer gets credit for a later fall
 	attacker.player:SetAttribute(ATTR.Stunned, false)
 
 	takeOwnership(attacker)
@@ -642,7 +691,7 @@ local function resolveHit(flight: Flight)
 	target.lastHitBy = attacker.player
 	target.lastHitAt = now()
 	target.player:SetAttribute(ATTR.Health, target.health)
-	broadcastResolved(flight, "Hit", false, damage)
+	broadcastResolved(flight, "Hit", flight.perfect, damage) -- perfect: a Perfect counter-dash (hits harder)
 
 	if target.health <= 0 then
 		defeat(target, attacker.player, "Kick")
@@ -707,6 +756,8 @@ local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighte
 	)
 	attacker.surge = false
 	attacker.player:SetAttribute(ATTR.Surged, false)
+	attacker.lastHitBy = defender.player -- if the blast knocks them off the arena, the defender gets the credit
+	attacker.lastHitAt = now()
 	stun(attacker, PARRY.StunTime, -axis)
 	blastBack(attacker, defender, axis, gap)
 
@@ -1169,9 +1220,7 @@ local function stepMovement(t: number)
 		local position = fighter.root.Position
 		if position.Y < settings.KillY then
 			-- Knocked off by a recent hit? Credit the attacker, so the victim sees who did it.
-			local lastHitBy = fighter.lastHitBy
-			local credit = if lastHitBy and t - fighter.lastHitAt <= HEALTH.LastHitCredit then lastHitBy else nil
-			defeat(fighter, credit, "Void")
+			defeat(fighter, recentAttacker(fighter), "Void")
 			continue
 		end
 		if fighter.serverOwned or t < fighter.releaseGraceUntil then
@@ -1288,14 +1337,14 @@ function CombatService.registerCombatant(player: Player): boolean
 	table.insert(
 		fighter.connections,
 		humanoid.Died:Connect(function()
-			defeat(fighter, nil, "Died")
+			defeat(fighter, recentAttacker(fighter), "Died")
 		end)
 	)
 	table.insert(
 		fighter.connections,
 		character.AncestryChanged:Connect(function(_, parent: Instance?)
 			if parent == nil then
-				defeat(fighter, nil, "Died")
+				defeat(fighter, recentAttacker(fighter), "Died")
 			end
 		end)
 	)
@@ -1385,6 +1434,12 @@ function CombatService.clearSurge(player: Player)
 	end
 end
 
+-- Current HP of a combatant (nil if not in the arena). Used for the round-timeout tiebreak.
+function CombatService.getHealth(player: Player): number?
+	local fighter = fighters[player]
+	return if fighter then fighter.health else nil
+end
+
 function CombatService.getSurgeHolders(): { Player }
 	local holders = {}
 	for player, fighter in fighters do
@@ -1420,7 +1475,7 @@ function CombatService.init(netRemotes: Net.Remotes)
 	Players.PlayerRemoving:Connect(function(player: Player)
 		local fighter = fighters[player]
 		if fighter then
-			defeat(fighter, nil, "Left")
+			defeat(fighter, recentAttacker(fighter), "Left") -- rage-quitting after a knock-off still credits the attacker
 			CombatService.unregisterCombatant(player)
 		end
 		integrityByPlayer[player] = nil
