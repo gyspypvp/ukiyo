@@ -317,6 +317,11 @@ end
 -- Public API -----------------------------------------------------------------------------
 
 -- Hide the card now (another kick is coming at you, or the round ended).
+-- Does the card overlap the parry ring? (Only on short screens, where it sits at the top edge.)
+function HitFeedback.coversRing(): boolean
+	return cardTop == CARD_TOP_SHORT
+end
+
 function HitFeedback.hideCard()
 	cardToken += 1
 	local ui = widgets
@@ -327,8 +332,12 @@ end
 
 HitFeedback.blockHint = blockHint
 
--- A kick resolved somewhere. Only hits on the local player produce feedback here.
-function HitFeedback.onKickResolved(payload: Types.KickResolvedPayload)
+--[[
+	A kick resolved somewhere. Only hits on the local player produce feedback here.
+	`othersIncoming`: more kicks are still coming at us. On short screens a card
+	would cover the parry ring they need, so a survivable hit only flashes then.
+]]
+function HitFeedback.onKickResolved(payload: Types.KickResolvedPayload, othersIncoming: boolean?)
 	if payload.outcome ~= "Hit" or payload.targetId ~= localPlayer.UserId then
 		return
 	end
@@ -343,6 +352,8 @@ function HitFeedback.onKickResolved(payload: Types.KickResolvedPayload)
 			parryTip()
 		)
 		killCam(payload.attackerId)
+	elseif othersIncoming and HitFeedback.coversRing() then
+		return -- the flash and the HUD health bar still show the hit
 	else
 		showCard(
 			payload.attackerId,
@@ -404,7 +415,7 @@ function HitFeedback.init(playerGui: PlayerGui)
 	local healthFrame = Instance.new("Frame")
 	healthFrame.Name = "Health"
 	healthFrame.AnchorPoint = Vector2.new(0.5, 1)
-	healthFrame.Position = UDim2.new(0.5, 0, 1, -150)
+	healthFrame.Position = UDim2.new(0.5, 0, 1, -162)
 	healthFrame.Size = UDim2.fromOffset(260, 20)
 	healthFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
 	healthFrame.BackgroundTransparency = 0.2
@@ -462,7 +473,7 @@ function HitFeedback.init(playerGui: PlayerGui)
 				holder.Position = UDim2.new(0.5, 0, 0, cardTop)
 			end
 			-- Shrink to fit short or narrow screens, but never below 70% (16 px text -> 11 px).
-			-- At 360 px tall the card spans 6-126 px, well clear of the HP bar at H-170.
+			-- At 360 px tall the card spans 6-126 px, well clear of the HP bar (H-182 to H-162).
 			fitScale.Scale = math.clamp(math.min(viewport.Y / 450, viewport.X * 0.92 / CARD_WIDTH), 0.7, 1)
 		end
 	end

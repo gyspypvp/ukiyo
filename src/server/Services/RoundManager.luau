@@ -45,6 +45,7 @@ type Round = {
 	mode: GameMode,
 	alive: { [Player]: boolean },
 	participants: { Player },
+	parryCoins: { [Player]: number }, -- parry income this round (capped)
 	running: boolean,
 }
 
@@ -347,7 +348,8 @@ local function runRound()
 	shuffle(arenaSpawns)
 
 	roundCounter += 1
-	local round: Round = { id = roundCounter, mode = mode, alive = {}, participants = {}, running = true }
+	local round: Round =
+		{ id = roundCounter, mode = mode, alive = {}, participants = {}, parryCoins = {}, running = true }
 	local ctx = makeContext(round)
 	currentRound = round
 	currentContext = ctx
@@ -440,8 +442,17 @@ function RoundManager.init(netRemotes: Net.Remotes)
 		if round == nil or ctx == nil or not round.running then
 			return
 		end
-		local reward = Config.Rewards.CoinsPerParry + (if perfect then Config.Rewards.CoinsPerPerfect else 0)
-		PlayerDataService.addCoins(defender, reward)
+		-- Capped per round: with everyone able to kick, friends could otherwise trade
+		-- parries (and harmless head-on clashes) all round for unlimited coins.
+		local earned = round.parryCoins[defender] or 0
+		local reward = math.min(
+			Config.Rewards.CoinsPerParry + (if perfect then Config.Rewards.CoinsPerPerfect else 0),
+			Config.Rewards.MaxParryCoinsPerRound - earned
+		)
+		if reward > 0 then
+			round.parryCoins[defender] = earned + reward
+			PlayerDataService.addCoins(defender, reward)
+		end
 		round.mode:onParried(ctx, defender, attacker, perfect)
 	end)
 

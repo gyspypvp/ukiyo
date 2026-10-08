@@ -39,6 +39,9 @@ local CombatFX = {}
 
 local stunGlows: { [Player]: Highlight } = {}
 local cleanups: { [number]: { () -> () } } = {}
+-- Per-kick visuals that would give away an Invis-Dash kicker (hidden when it activates).
+local kickTrails: { [number]: Trail } = {}
+local kickMarks: { [number]: Highlight } = {}
 local toastLabel: TextLabel? = nil
 
 -- Helpers ---------------------------------------------------------------------------
@@ -172,6 +175,14 @@ local function invisDash(payload: Types.EffectPayload)
 		return
 	end
 	setCharacterHidden(player, true)
+	-- The trail and the "kicking you" outline would give the invisible kicker away.
+	local trail, mark = kickTrails[payload.kickId], kickMarks[payload.kickId]
+	if trail then
+		trail.Enabled = false
+	end
+	if mark then
+		mark.Enabled = false
+	end
 	addCleanup(payload.kickId, function()
 		setCharacterHidden(player, false)
 	end)
@@ -339,11 +350,30 @@ function CombatFX.onKickStarted(payload: Types.KickStartedPayload)
 	trail.Color = ColorSequence.new(Color3.fromRGB(255, 200, 80):Lerp(PERFECT_COLOR, heat), KICK_COLOR)
 	trail.Transparency = NumberSequence.new(0.1, 1)
 	trail.Parent = root
+	kickTrails[payload.kickId] = trail
 	addCleanup(payload.kickId, function()
+		kickTrails[payload.kickId] = nil
 		trail:Destroy()
 		top:Destroy()
 		bottom:Destroy()
 	end)
+
+	-- With several fliers in the air, outline the ones kicking YOU until their kick resolves.
+	local character = attacker.Character
+	if payload.targetId == localPlayer.UserId and character then
+		local mark = Instance.new("Highlight")
+		mark.Name = "CK_KickingYou"
+		mark.FillTransparency = 1
+		mark.OutlineColor = PERFECT_COLOR
+		mark.OutlineTransparency = 0
+		mark.Adornee = character
+		mark.Parent = character
+		kickMarks[payload.kickId] = mark
+		addCleanup(payload.kickId, function()
+			kickMarks[payload.kickId] = nil
+			mark:Destroy()
+		end)
+	end
 
 	-- Perfect parry: red aura on the counter-dasher.
 	if payload.perfect and attacker.Character then

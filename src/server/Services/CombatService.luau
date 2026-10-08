@@ -475,7 +475,13 @@ end
 
 -- `damage` is only set for a "Hit". The rally/speed/damage numbers are what the
 -- victim's hit card shows, so "who hit me and why" is always answered.
-local function broadcastResolved(flight: Flight, outcome: Types.KickOutcome, perfect: boolean, damage: number?)
+local function broadcastResolved(
+	flight: Flight,
+	outcome: Types.KickOutcome,
+	perfect: boolean,
+	damage: number?,
+	at: Vector3? -- where it happened (defaults to the kicker's position)
+)
 	local target = flight.target
 	local payload: Types.KickResolvedPayload = {
 		kickId = flight.id,
@@ -484,7 +490,7 @@ local function broadcastResolved(flight: Flight, outcome: Types.KickOutcome, per
 		targetId = target.player.UserId,
 		perfect = perfect,
 		direction = flight.direction,
-		position = flight.attacker.root.Position,
+		position = at or flight.attacker.root.Position,
 		rally = flight.rally,
 		speed = flight.speed,
 		damage = damage or 0,
@@ -543,6 +549,46 @@ local function impactTimeOf(flight: Flight): number
 	return if flight.phase == "Frozen" then math.huge else (flight.impactAt or flight.eta)
 end
 
+-- Has a kick already made contact with this fighter (its clash frame is running)?
+local function beingStruck(fighter: Fighter): boolean
+	for _, incoming in fighter.incoming do
+		if incoming.active and incoming.phase == "Clash" then
+			return true
+		end
+	end
+	return false
+end
+
+--[[
+	Blast a fighter back so it ends up `gap` studs from `origin` along `axis`,
+	unless it is already further away. The move is an instant server-side
+	reposition, not a glide: after a parry the counter-dash launches on the same
+	frame, and a glide would be overtaken at high rally speeds, turning every late
+	parry into a point-blank, unanswerable kill.
+	A raycast stops the blast at walls and floors.
+]]
+local function blastBack(fighter: Fighter, origin: Vector3, axis: Vector3, gap: number)
+	local start = fighter.root.Position
+	local destination = origin + axis * gap
+	if (start - origin).Magnitude >= gap then
+		return
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude: { Instance } = {}
+	for _, fighter in fighters do
+		table.insert(exclude, fighter.character)
+	end
+	params.FilterDescendantsInstances = exclude
+
+	local hit = Workspace:Raycast(start, destination - start, params)
+	if hit then
+		destination = hit.Position - axis * 2 -- stop just short of the wall
+	end
+	fighter.root.CFrame = CFrame.new(destination) * fighter.root.CFrame.Rotation
+end
+
 -- Flights ----------------------------------------------------------------------------
 
 -- Forward declaration: startFlight (a parry made mid-flight) needs finishFlight, defined below it.
@@ -571,6 +617,18 @@ local function startFlight(
 	if previous then
 		finishFlight(previous)
 		broadcastResolved(previous, "Cancelled", false)
+	end
+
+	-- Too close to react to? Hop back to MinKickDistance first, so every kick has
+	-- travel time to parry. (A ricochet straight back at the parried attacker is
+	-- exempt: the ricochet gap already sets that distance.)
+	takeOwnership(attacker)
+	if not predictable then
+		local away = attacker.root.Position - target.root.Position
+		if away.Magnitude < KICK.MinKickDistance then
+			local axis = if away.Magnitude > 1e-3 then away.Unit else -attacker.root.CFrame.LookVector
+			blastBack(attacker, target.root.Position, axis, KICK.MinKickDistance)
+		end
 	end
 
 	local offset = target.root.Position - attacker.root.Position
@@ -701,36 +759,6 @@ local function resolveHit(flight: Flight)
 end
 
 --[[
-	Blast a fighter back so it ends up `gap` studs from `origin` along `axis`,
-	unless it is already further away. The move is an instant server-side
-	reposition, not a glide: after a parry the counter-dash launches on the same
-	frame, and a glide would be overtaken at high rally speeds, turning every late
-	parry into a point-blank, unanswerable kill.
-	A raycast stops the blast at walls and floors.
-]]
-local function blastBack(fighter: Fighter, origin: Vector3, axis: Vector3, gap: number)
-	local start = fighter.root.Position
-	local destination = origin + axis * gap
-	if (start - origin).Magnitude >= gap then
-		return
-	end
-
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local exclude: { Instance } = {}
-	for _, fighter in fighters do
-		table.insert(exclude, fighter.character)
-	end
-	params.FilterDescendantsInstances = exclude
-
-	local hit = Workspace:Raycast(start, destination - start, params)
-	if hit then
-		destination = hit.Position - axis * 2 -- stop just short of the wall
-	end
-	fighter.root.CFrame = CFrame.new(destination) * fighter.root.CFrame.Rotation
-end
-
---[[
 	SUCCESSFUL PARRY
 	  1. The attacker's momentum is cancelled: blasted back to the RICOCHET GAP
 	     set by the defender's stance (CombatMath.ricochetGap), then stunned
@@ -790,8 +818,8 @@ local function resolveHeadOn(a: Flight, b: Flight)
 	stun(second, KICK.ClashStun, axis)
 	blastBack(first, middle, axis, KICK.ClashGap / 2)
 	blastBack(second, middle, -axis, KICK.ClashGap / 2)
-	broadcastResolved(a, "Clashed", false)
-	broadcastResolved(b, "Clashed", false)
+	broadcastResolved(a, "Clashed", false, nil, middle) -- spark where they met, not where they bounced to
+	broadcastResolved(b, "Clashed", false, nil, middle)
 end
 
 -- Contact reached: hold the "clash frame" while a late-arriving parry can still land.
@@ -814,6 +842,12 @@ local function enterClash(flight: Flight, t: number)
 	attacker.mover.velocity.VectorVelocity = Vector3.zero
 	attacker.root.CFrame = CFrame.new(target.root.Position - direction * KICK.ImpactRadius * 0.8)
 		* attacker.root.CFrame.Rotation
+	-- A target that was mid-kick stops dead: their kick waits for this verdict
+	-- (a hit cancels it, a Block replaces it with a ricochet).
+	local ownKick = target.flight
+	if ownKick and ownKick.phase ~= "Clash" then
+		target.mover.velocity.VectorVelocity = Vector3.zero
+	end
 	broadcastEta(flight, t, true)
 end
 
@@ -843,6 +877,12 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 		cancelFlight(flight)
 		return
 	end
+	if flight.phase ~= "Clash" and beingStruck(attacker) then
+		-- Our kicker has just been struck: this kick hangs until that verdict.
+		-- (A kick that landed FIRST, already in its own clash frame, still resolves.)
+		attacker.mover.velocity.VectorVelocity = Vector3.zero
+		return
+	end
 
 	local velocity = attacker.mover.velocity
 	local attackerPosition = attacker.root.Position
@@ -852,6 +892,18 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 
 	if flight.phase == "Clash" then
 		velocity.VectorVelocity = Vector3.zero
+		if gap > KICK.ImpactRadius * 2 then
+			-- The target was blasted or carried away (a parry, a clash, another hit):
+			-- this contact is stale, so home in again instead of landing from afar.
+			flight.phase = "Flying"
+			flight.impactAt = nil
+			flight.resolveAt = math.huge
+			return
+		end
+		-- Keep the clash frame glued to the target, so what everyone sees is what lands.
+		local pin = if gap > 1e-3 then (targetPosition - attackerPosition) / gap else flight.direction
+		attacker.root.CFrame = CFrame.new(targetPosition - pin * KICK.ImpactRadius * 0.8)
+			* attacker.root.CFrame.Rotation
 		if t >= flight.resolveAt then
 			resolveHit(flight)
 		end
@@ -895,7 +947,7 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 	-- kick (~7 studs per frame) can't tunnel through the target between Heartbeats.
 	if gap <= KICK.ImpactRadius + flight.speed * dt then
 		local counter = target.flight
-		if counter and counter.active and counter.target == attacker then
+		if counter and counter.active and counter.target == attacker and counter.phase ~= "Clash" then
 			resolveHeadOn(flight, counter) -- we kicked each other: bounce, no damage
 		else
 			enterClash(flight, t)
@@ -1039,14 +1091,28 @@ local function onLaunchRequest(player: Player, rawTargetId: unknown, rawCamera: 
 		return
 	end
 	local t = now()
-	if attacker.flight or t < attacker.stunUntil or t < attacker.kickReadyAt then
-		return
+	if attacker.flight or t < attacker.stunUntil or t < attacker.kickReadyAt or beingStruck(attacker) then
+		return -- (being struck: a kick has already made contact; only a Block can still save you)
 	end
 
 	local targetPlayer = Guard.player(rawTargetId)
 	local camera = Guard.cframe(rawCamera)
 	local target = if targetPlayer then fighters[targetPlayer] else nil
 	if target == nil or camera == nil or not isEligibleTarget(attacker, target) then
+		return
+	end
+
+	-- Their kick is about to land on you: the answer is Block, not a counter-kick.
+	-- Otherwise kicking back would be a timing-free way to turn any kick into a
+	-- harmless head-on clash. (An EARLY counter is allowed, and the original
+	-- attacker can parry it mid-flight.)
+	local threat = target.flight
+	if
+		threat
+		and threat.active
+		and threat.target == attacker
+		and impactTimeOf(threat) - t <= PARRY.BaseWindow + PlayerDataService.getParryWindowBonus(player)
+	then
 		return
 	end
 
@@ -1167,7 +1233,9 @@ local function onParryRequest(player: Player, rawKickId: unknown, rawStamp: unkn
 
 	-- 3. Distance
 	local gap = gapAt(flight, pressedAt)
-	local reach = KICK.ImpactRadius + (flight.speed + runCap(defender)) * (window + maxRewind) + PARRY.DistanceSlack
+	-- The defender may be flying too (blocking mid-kick): count their real speed, not just running speed.
+	local defenderSpeed = math.max(runCap(defender), trustedVelocity(defender).Magnitude)
+	local reach = KICK.ImpactRadius + (flight.speed + defenderSpeed) * (window + maxRewind) + PARRY.DistanceSlack
 	if gap > reach then
 		whiff(defender, receivedAt, "TooFar", flight.id)
 		return

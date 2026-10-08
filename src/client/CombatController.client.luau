@@ -46,6 +46,8 @@ local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui") :: PlayerGui
 local remotes = Net.client()
 local ATTR = Net.Attributes
+local STATE = Net.StateAttributes
+local roundState = Net.stateFolder()
 
 --[[
 	LATENCY PROBE. Answer the server's ping instantly, with no other work in
@@ -124,6 +126,17 @@ local function soonestIncoming(): (IncomingKick?, number)
 	return soonest, count
 end
 
+-- Can we start a kick right now? (The server re-checks all of this.)
+local function canKickNow(t: number): boolean
+	local phase = roundState:GetAttribute(STATE.Phase)
+	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
+	return localPlayer:GetAttribute(ATTR.InArena) == true
+		and (phase == "Active" or phase == "FinalDuel") -- no kicking during the spawn countdown
+		and localPlayer:GetAttribute(ATTR.Flying) ~= true
+		and localPlayer:GetAttribute(ATTR.Stunned) ~= true
+		and (typeof(readyAt) ~= "number" or t >= readyAt)
+end
+
 local function isAliveCharacter(player: Player): boolean
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -198,11 +211,22 @@ local function buildHud(): Hud
 	gui.IgnoreGuiInset = true
 	gui.Parent = playerGui
 
-	local kickKey = if UserInputService.KeyboardEnabled then "LMB" else ""
-	local kickButton = actionButton(gui, "KICK", "⚡", kickKey, -116)
+	local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local kickButton = actionButton(gui, "KICK", "⚡", if touchOnly then "" else "LMB", -116)
 	kickButton.BackgroundColor3 = Color3.fromRGB(230, 70, 40)
-	local blockButton = actionButton(gui, "BLOCK", "🛡", "F", 0)
-	local abilityButton = actionButton(gui, "ABILITY", "»", "Q", 116)
+	local blockButton = actionButton(gui, "BLOCK", "🛡", if touchOnly then "" else "F", 0)
+	local abilityButton = actionButton(gui, "ABILITY", "»", if touchOnly then "" else "Q", 116)
+	if touchOnly then
+		-- Phones/tablets: every action under the RIGHT thumb. The left of the screen
+		-- belongs to the movement thumbstick, and the cluster's right edge (W-184)
+		-- stays clear of Roblox's Jump button on both phone and tablet layouts.
+		for _, button in { kickButton, blockButton, abilityButton } do
+			button.AnchorPoint = Vector2.new(1, 1)
+		end
+		kickButton.Position = UDim2.new(1, -184, 1, -36)
+		blockButton.Position = UDim2.new(1, -288, 1, -36)
+		abilityButton.Position = UDim2.new(1, -184, 1, -160)
+	end
 
 	-- Cooldown shades that drain away as each action becomes available again.
 	local function cooldownShade(button: TextButton): Frame
@@ -254,8 +278,8 @@ local function buildHud(): Hud
 
 	-- "x2", "x3": how many kicks are coming at you right now.
 	local ringCount = Instance.new("TextLabel")
-	ringCount.AnchorPoint = Vector2.new(0.5, 0)
-	ringCount.Position = UDim2.new(0.5, 0, 1, 6)
+	ringCount.AnchorPoint = Vector2.new(0, 0.5)
+	ringCount.Position = UDim2.new(1, 8, 0.5, 0) -- beside the ring, never down on the buttons
 	ringCount.Size = UDim2.fromOffset(60, 30)
 	ringCount.BackgroundTransparency = 1
 	ringCount.Font = Enum.Font.LuckiestGuy
@@ -356,9 +380,9 @@ local function updateTargeting(camera: Camera)
 		hud.lockDot.Adornee = targetRoot
 	end
 	hud.lockDot.Enabled = targetRoot ~= nil
-	-- Big, solid dot when your kick is ready; small and faded while it cools down.
-	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
-	local ready = typeof(readyAt) ~= "number" or serverNow() >= readyAt
+	-- Big, solid dot when you can kick right now; small and faded otherwise
+	-- (cooling down, stunned, mid-flight, or the round hasn't started).
+	local ready = canKickNow(serverNow())
 	hud.lockDot.Size = if ready then UDim2.fromOffset(22, 22) else UDim2.fromOffset(14, 14)
 	hud.lockDotFill.BackgroundTransparency = if ready then 0 else 0.45
 end
@@ -391,15 +415,6 @@ local function updateWarning(t: number)
 	hud.warningStroke.Transparency = 0.85 - 0.75 * urgency
 end
 
--- Can we start a kick right now? (The server re-checks all of this.)
-local function canKickNow(t: number): boolean
-	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
-	return localPlayer:GetAttribute(ATTR.InArena) == true
-		and localPlayer:GetAttribute(ATTR.Flying) ~= true
-		and localPlayer:GetAttribute(ATTR.Stunned) ~= true
-		and (typeof(readyAt) ~= "number" or t >= readyAt)
-end
-
 local function updateButtons(t: number)
 	local remaining = math.max(parryLockUntil - t, 0)
 	hud.blockCooldown.Size = UDim2.fromScale(1, math.clamp(remaining / Config.Parry.WhiffCooldown, 0, 1))
@@ -407,12 +422,15 @@ local function updateButtons(t: number)
 	local inArena = localPlayer:GetAttribute(ATTR.InArena) == true
 	local flying = localPlayer:GetAttribute(ATTR.Flying) == true
 	hud.abilityButton.BackgroundTransparency = if flying then 0 else 0.45
+	-- Combat buttons only exist in the arena; the lobby is for shopping and spectating.
+	hud.kickButton.Visible = inArena
+	hud.blockButton.Visible = inArena
+	hud.abilityButton.Visible = inArena
 
 	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
 	local kickRemaining = if typeof(readyAt) == "number" then math.max(readyAt - t, 0) else 0
 	hud.kickCooldown.Size = UDim2.fromScale(1, math.clamp(kickRemaining / Config.Kick.Cooldown, 0, 1))
-	local blocked = flying or localPlayer:GetAttribute(ATTR.Stunned) == true
-	hud.kickButton.BackgroundTransparency = if blocked or not inArena then 0.55 else 0
+	hud.kickButton.BackgroundTransparency = if canKickNow(t) then 0 else 0.55
 end
 
 RunService:BindToRenderStep("ClashKickCombat", Enum.RenderPriority.Camera.Value + 1, function()
@@ -527,7 +545,9 @@ remotes.KickStarted.OnClientEvent:Connect(function(payload: Types.KickStartedPay
 			eta = payload.eta,
 			etaSentAt = payload.startedAt,
 		}
-		HitFeedback.hideCard() -- never let the last hit's card cover the parry ring
+		if HitFeedback.coversRing() then
+			HitFeedback.hideCard() -- on short screens the card would sit over the parry ring
+		end
 	end
 	CombatFX.onKickStarted(payload)
 end)
@@ -564,7 +584,8 @@ remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedP
 	end
 
 	CombatFX.onKickResolved(payload)
-	HitFeedback.onKickResolved(payload) -- hit card: who hit you, how much, why
+	-- Hit card: who hit you, how much, why (held back on short screens while more kicks are coming).
+	HitFeedback.onKickResolved(payload, next(incomingKicks) ~= nil)
 end)
 
 remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPayload)
