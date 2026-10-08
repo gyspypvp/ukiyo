@@ -44,6 +44,13 @@ function Guard.cframe(value: unknown): CFrame?
 	return value
 end
 
+function Guard.vector3(value: unknown): Vector3?
+	if typeof(value) == "Vector3" and finite(value.X) and finite(value.Y) and finite(value.Z) then
+		return value
+	end
+	return nil
+end
+
 -- Resolves a UserId to an in-game Player (nil if invalid or not in this server).
 function Guard.player(value: unknown): Player?
 	local userId = Guard.integer(value, -(2 ^ 53), 2 ^ 53)

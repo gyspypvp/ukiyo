@@ -15,7 +15,7 @@
 	     InvokeClient (a client could hang the server thread forever).
 	  3. State that supersedes itself (the live impact ETA) goes over an
 	     UnreliableRemoteEvent: a dropped packet is replaced 50 ms later anyway.
-	  4. Persistent state (phase, health, who is stunned or flying) lives in
+	  4. Persistent state (phase, strikes, who is stunned or flying) lives in
 	     Attributes, which replicate automatically and are correct for late joiners.
 	  5. Every timestamp is server time (workspace:GetServerTimeNow()).
 ]]
@@ -30,7 +30,9 @@ export type Remotes = {
 	-- Client -> Server: combat intent (RemoteEvent, reliable, rate-limited, validated)
 	RequestLaunch: RemoteEvent, -- (targetUserId: number, cameraCFrame: CFrame)
 	RequestParry: RemoteEvent, -- (kickId: number, pressServerTime: number, lockUserId: number?)
-	RequestAbility: RemoteEvent, -- ()
+	RequestAbility: RemoteEvent, -- ()  (SKILL button: equipped Leg Style, mid-flight)
+	RequestDash: RemoteEvent, -- (direction: Vector3)
+	RequestUltimate: RemoteEvent, -- (targetUserId: number, cameraCFrame: CFrame)
 	PingReply: RemoteEvent, -- (nonce: number)
 
 	-- Server -> Client
@@ -40,6 +42,7 @@ export type Remotes = {
 	KickResolved: RemoteEvent, -- (Types.KickResolvedPayload), all clients
 	ParryFeedback: RemoteEvent, -- (Types.ParryFeedbackPayload), presser only
 	Effect: RemoteEvent, -- (Types.EffectPayload), all clients
+	Ultimate: RemoteEvent, -- (Types.UltimatePayload), all clients: leap / dive / miss / cancel
 	RoundEvent: RemoteEvent, -- (Types.RoundEventPayload), all clients
 
 	-- Lobby request/response (RemoteFunction, Client -> Server ONLY)
@@ -56,10 +59,13 @@ local Net = {}
 Net.Attributes = table.freeze({
 	InArena = "CK_InArena", -- boolean: a live combatant in the current round
 	KickReadyAt = "CK_KickReadyAt", -- number: server time when this player may kick again (cooldown UI)
+	DashReadyAt = "CK_DashReadyAt", -- number: server time when this player may dash again
+	UltCharge = "CK_UltCharge", -- number 0..1: ULTIMATE meter (full = ready)
+	Ultimate = "CK_Ultimate", -- boolean: performing an ULTIMATE right now
 	Flying = "CK_Flying", -- boolean: currently a human missile
 	Stunned = "CK_Stunned", -- boolean: frozen mid-air after being parried, or tumbling after a hit
-	Health = "CK_Health", -- number: current HP while in the arena
-	MaxHealth = "CK_MaxHealth", -- number: HP cap (drives health bars)
+	Strikes = "CK_Strikes", -- number: kicks this player has taken this round (in the arena only)
+	StrikesToExplode = "CK_StrikesToExplode", -- number: strikes that explode them (drives the strike pips)
 	Flagged = "CK_Flagged", -- string: integrity flag reason (moderation tooling)
 })
 
@@ -140,6 +146,8 @@ local function build(isServer: boolean): Remotes
 		RequestLaunch = event("RequestLaunch"),
 		RequestParry = event("RequestParry"),
 		RequestAbility = event("RequestAbility"),
+		RequestDash = event("RequestDash"),
+		RequestUltimate = event("RequestUltimate"),
 		PingReply = event("PingReply"),
 
 		Ping = event("Ping"),
@@ -148,6 +156,7 @@ local function build(isServer: boolean): Remotes
 		KickResolved = event("KickResolved"),
 		ParryFeedback = event("ParryFeedback"),
 		Effect = event("Effect"),
+		Ultimate = event("Ultimate"),
 		RoundEvent = event("RoundEvent"),
 
 		GetProfile = func("GetProfile"),

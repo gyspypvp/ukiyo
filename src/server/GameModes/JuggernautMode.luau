@@ -9,9 +9,9 @@
 	or RoundManager. Balance and polish are future work.
 
 	  * One random player is the Juggernaut and is the ONLY one who may start
-	    kicks (canLaunch).
-	  * Runners can only Block. A parry ricochets back at the Juggernaut, and
-	    canTarget stops runners redirecting onto each other.
+	    kicks or ULTIMATEs (canLaunch).
+	  * Runners can only Block and DASH. A parry ricochets back at the
+	    Juggernaut, and canTarget stops runners redirecting onto each other.
 	  * Runners win if the Juggernaut is KO'd; the Juggernaut wins if it's
 	    the last one standing.
 
@@ -61,14 +61,13 @@ local JuggernautMode: ServerTypes.GameMode = {
 		ctx.eliminate(victim, attacker, cause)
 	end,
 
-	-- Future: give the Juggernaut more HP than the runners.
-	onDamaged = function(
+	-- Future: make the Juggernaut take more strikes than the runners.
+	onStruck = function(
 		_self: ServerTypes.GameMode,
 		_ctx: RoundContext,
 		_victim: Player,
 		_attacker: Player,
-		_damage: number,
-		_health: number
+		_strikes: number
 	)
 	end,
 

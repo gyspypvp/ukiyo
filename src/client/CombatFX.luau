@@ -5,10 +5,16 @@
 	Purely cosmetic, client-side visuals. Nothing here affects gameplay: the
 	server decides every outcome, and this module just draws it.
 
-	  * Stun glow (attribute-driven), kick trails, parry and clash sparks,
-	    Perfect-parry red aura, floating damage numbers
+	  * Stun glow (attribute-driven), glowing kick foot and pose (RiderKick),
+	    parry shockwave + sparks, head-on clash burst, Perfect-parry red aura
+	  * Duels: a rally counter between the two fighters that ticks up per parry
+	  * Strikes: "STRIKE 1" / "STRIKE 2" popups, and on the finishing strike an
+	    explosion (fireball, shock ring, smoke, embers, light, camera shake)
+	    that hides the exploded body until the server moves it to the lobby
+	  * ULTIMATE: the performer's aura and the impact marker on the ground,
+	    filling up until the dive lands; DASH: a short trail
 	  * Leg Style effects: Invis-Dash, Shadow Clone decoys, Lag Switch glitch
-	  * Toast text ("PERFECT!", "WHIFF", ...)
+	  * Toast text ("PERFECT!", "DASH!", ...)
 
 	Every effect tied to a kick registers a cleanup under its kickId, run when
 	KickResolved arrives (with a timeout failsafe if that packet is ever lost).
@@ -26,22 +32,30 @@ local CombatMath = require(Shared:WaitForChild("CombatMath"))
 local Config = require(Shared:WaitForChild("Config"))
 local Net = require(Shared:WaitForChild("Net"))
 local Types = require(Shared:WaitForChild("Types"))
+local RiderKick = require(script.Parent:WaitForChild("RiderKick"))
+local UiTheme = require(script.Parent:WaitForChild("UiTheme"))
 
 local ATTR = Net.Attributes
+local COLORS = UiTheme.Colors
 local localPlayer = Players.LocalPlayer
 
-local KICK_COLOR = Color3.fromRGB(255, 120, 40)
+local KICK_COLOR = COLORS.Kick
 local PERFECT_COLOR = Color3.fromRGB(255, 40, 60)
 local STUN_COLOR = Color3.fromRGB(255, 230, 90)
 local SPARK_TEXTURE = "rbxasset://textures/particles/sparkles_main.dds"
+local SMOKE_TEXTURE = "rbxasset://textures/particles/smoke_main.dds"
+local FIRE_TEXTURE = "rbxasset://textures/particles/fire_main.dds"
+local EXPLOSION_HIDE_TIME = 1.4 -- the server moves an exploded player to the lobby after ~1.25 s
+local SHAKE_RANGE = 90 -- studs: explosions closer than this shake your camera
 
 local CombatFX = {}
 
 local stunGlows: { [Player]: Highlight } = {}
 local cleanups: { [number]: { () -> () } } = {}
 -- Per-kick visuals that would give away an Invis-Dash kicker (hidden when it activates).
-local kickTrails: { [number]: Trail } = {}
+local kickGlows: { [number]: RiderKick.Glow } = {}
 local kickMarks: { [number]: Highlight } = {}
+local ultimateZones: { [number]: () -> () } = {} -- ULTIMATE id -> removes its impact marker
 local toastLabel: TextLabel? = nil
 
 -- Helpers ---------------------------------------------------------------------------
@@ -110,6 +124,83 @@ local function burst(position: Vector3, color: Color3, count: number, speed: num
 	Debris:AddItem(part, 1)
 end
 
+-- A flat neon disc that expands and fades: the shockwave of a parry or an explosion.
+-- `normal` is the axis the disc faces (the kick direction; straight up for a ground ring).
+local function shockRing(
+	position: Vector3,
+	normal: Vector3,
+	color: Color3,
+	fromSize: number,
+	toSize: number,
+	time: number
+)
+	local axis = if normal.Magnitude > 1e-3 then normal.Unit else Vector3.yAxis
+	local up = if math.abs(axis.Y) > 0.98 then Vector3.zAxis else Vector3.yAxis
+	local ring = effectPart(position)
+	ring.Shape = Enum.PartType.Cylinder -- a cylinder's axis is its X axis
+	ring.Material = Enum.Material.Neon
+	ring.Color = color
+	ring.Transparency = 0.25
+	ring.Size = Vector3.new(0.25, fromSize, fromSize)
+	ring.CFrame = CFrame.lookAt(position, position + axis, up) * CFrame.Angles(0, math.pi / 2, 0)
+	TweenService:Create(ring, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.new(0.25, toSize, toSize),
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(ring, time + 0.05)
+end
+
+-- A world-space popup ("STRIKE 2", "x7") that drifts up and fades.
+local function popup(position: Vector3, text: string, color: Color3, height: number, rise: number)
+	local part = effectPart(position)
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromOffset(height * 5, height)
+	gui.AlwaysOnTop = true
+	gui.LightInfluence = 0
+	gui.Parent = part
+
+	local label = UiTheme.text(gui, UiTheme.FontHeavy, color)
+	label.Size = UDim2.fromScale(1, 1)
+	label.Text = text
+	local outline = UiTheme.stroke(label, 1.5, Color3.new(0, 0, 0), 0.35)
+
+	TweenService:Create(gui, TweenInfo.new(0.9, Enum.EasingStyle.Quad), { StudsOffset = Vector3.new(0, rise, 0) })
+		:Play()
+	local fade = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In, 0, false, 0.5)
+	TweenService:Create(label, fade, { TextTransparency = 1 }):Play()
+	TweenService:Create(outline, fade, { Transparency = 1 }):Play()
+	Debris:AddItem(part, 1)
+end
+
+-- Briefly shake the local camera, stronger the closer the blast.
+local shakeToken = 0
+local function shakeCamera(origin: Vector3, strength: number, duration: number)
+	local camera = Workspace.CurrentCamera
+	if camera == nil then
+		return
+	end
+	local distance = (camera.CFrame.Position - origin).Magnitude
+	if distance > SHAKE_RANGE then
+		return
+	end
+	local amplitude = strength * (1 - distance / SHAKE_RANGE)
+	shakeToken += 1
+	local token = shakeToken
+	local startedAt = os.clock()
+	local name = `CK_Shake{token}`
+	RunService:BindToRenderStep(name, Enum.RenderPriority.Camera.Value + 2, function()
+		local elapsed = os.clock() - startedAt
+		local current = Workspace.CurrentCamera
+		if elapsed >= duration or token ~= shakeToken or current == nil then
+			RunService:UnbindFromRenderStep(name)
+			return
+		end
+		-- Applied after the camera script each frame, so it never accumulates.
+		local decay = amplitude * (1 - elapsed / duration)
+		current.CFrame = current.CFrame * CFrame.Angles((math.random() - 0.5) * decay, (math.random() - 0.5) * decay, 0)
+	end)
+end
+
 local function pulseHighlight(character: Model, color: Color3, duration: number)
 	local highlight = Instance.new("Highlight")
 	highlight.FillColor = color
@@ -140,9 +231,45 @@ local function refreshPlayer(player: Player)
 	end
 end
 
+-- DASH: a short trail on whoever dashed. Every client sees DashReadyAt change,
+-- so no extra remote is needed: a fresh cooldown means a dash just started.
+local function dashTrail(player: Player)
+	local readyAt = player:GetAttribute(ATTR.DashReadyAt)
+	if typeof(readyAt) ~= "number" or readyAt - Config.Dash.Cooldown < Workspace:GetServerTimeNow() - 0.25 then
+		return
+	end
+	local root = rootOf(player)
+	if root == nil then
+		return
+	end
+	local top = Instance.new("Attachment")
+	top.Position = Vector3.new(0, 1.4, 0)
+	top.Parent = root
+	local bottom = Instance.new("Attachment")
+	bottom.Position = Vector3.new(0, -1.6, 0)
+	bottom.Parent = root
+	local trail = Instance.new("Trail")
+	trail.Attachment0 = top
+	trail.Attachment1 = bottom
+	trail.Lifetime = 0.2
+	trail.LightEmission = 0.6
+	trail.Color = ColorSequence.new(COLORS.Dash)
+	trail.Transparency = NumberSequence.new(0.3, 1)
+	trail.Parent = root
+	task.delay(Config.Dash.Time + 0.05, function()
+		trail.Enabled = false
+	end)
+	Debris:AddItem(trail, 0.6)
+	Debris:AddItem(top, 0.6)
+	Debris:AddItem(bottom, 0.6)
+end
+
 local function watchPlayer(player: Player)
 	player:GetAttributeChangedSignal(ATTR.Stunned):Connect(function()
 		refreshPlayer(player)
+	end)
+	player:GetAttributeChangedSignal(ATTR.DashReadyAt):Connect(function()
+		dashTrail(player)
 	end)
 	player.CharacterAdded:Connect(function()
 		stunGlows[player] = nil -- the old glow died with the old character
@@ -153,13 +280,7 @@ end
 
 -- Leg Style effects --------------------------------------------------------------------
 
-local function setCharacterHidden(player: Player, hidden: boolean)
-	local character = player.Character
-	if character == nil then
-		return
-	end
-	-- The kicker still sees a ghost of themselves; everyone else sees nothing.
-	local modifier = if not hidden then 0 elseif player == localPlayer then 0.6 else 1
+local function setBodyTransparency(character: Model, modifier: number)
 	for _, descendant in character:GetDescendants() do
 		if descendant:IsA("BasePart") then
 			descendant.LocalTransparencyModifier = modifier
@@ -169,16 +290,25 @@ local function setCharacterHidden(player: Player, hidden: boolean)
 	end
 end
 
+local function setCharacterHidden(player: Player, hidden: boolean)
+	local character = player.Character
+	if character == nil then
+		return
+	end
+	-- The kicker still sees a ghost of themselves; everyone else sees nothing.
+	setBodyTransparency(character, if not hidden then 0 elseif player == localPlayer then 0.6 else 1)
+end
+
 local function invisDash(payload: Types.EffectPayload)
 	local player = Players:GetPlayerByUserId(payload.userId)
 	if player == nil then
 		return
 	end
 	setCharacterHidden(player, true)
-	-- The trail and the "kicking you" outline would give the invisible kicker away.
-	local trail, mark = kickTrails[payload.kickId], kickMarks[payload.kickId]
-	if trail then
-		trail.Enabled = false
+	-- The glowing foot and the "kicking you" outline would give the invisible kicker away.
+	local glow, mark = kickGlows[payload.kickId], kickMarks[payload.kickId]
+	if glow then
+		glow.setEnabled(false)
 	end
 	if mark then
 		mark.Enabled = false
@@ -294,7 +424,7 @@ function CombatFX.cleanupKick(kickId: number)
 	end
 end
 
--- Big center-screen text: "PERFECT!", "WHIFF", "NO TARGET"...
+-- Big center-screen text: "PERFECT!", "DASH!", "NO TARGET"...
 function CombatFX.toast(text: string, color: Color3)
 	local label = toastLabel
 	if label == nil then
@@ -303,8 +433,8 @@ function CombatFX.toast(text: string, color: Color3)
 	label.Text = text
 	label.TextColor3 = color
 	label.TextTransparency = 0
-	label.Size = UDim2.fromScale(0.5, 0.11)
-	TweenService:Create(label, TweenInfo.new(0.12, Enum.EasingStyle.Back), { Size = UDim2.fromScale(0.42, 0.09) })
+	label.Size = UDim2.fromScale(0.48, 0.085)
+	TweenService:Create(label, TweenInfo.new(0.12, Enum.EasingStyle.Back), { Size = UDim2.fromScale(0.42, 0.07) })
 		:Play()
 	TweenService:Create(label, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In, 0, false, 0.45), {
 		TextTransparency = 1,
@@ -334,32 +464,27 @@ function CombatFX.onKickStarted(payload: Types.KickStartedPayload)
 		return
 	end
 
-	-- Speed trail, hotter as the rally accelerates.
-	local top = Instance.new("Attachment")
-	top.Position = Vector3.new(0, 1.5, 0)
-	top.Parent = root
-	local bottom = Instance.new("Attachment")
-	bottom.Position = Vector3.new(0, -1.5, 0)
-	bottom.Parent = root
-	local heat = math.clamp(payload.rally / 10, 0, 1)
-	local trail = Instance.new("Trail")
-	trail.Attachment0 = top
-	trail.Attachment1 = bottom
-	trail.Lifetime = 0.25
-	trail.LightEmission = 1
-	trail.Color = ColorSequence.new(Color3.fromRGB(255, 200, 80):Lerp(PERFECT_COLOR, heat), KICK_COLOR)
-	trail.Transparency = NumberSequence.new(0.1, 1)
-	trail.Parent = root
-	kickTrails[payload.kickId] = trail
-	addCleanup(payload.kickId, function()
-		kickTrails[payload.kickId] = nil
-		trail:Destroy()
-		top:Destroy()
-		bottom:Destroy()
-	end)
+	-- The kicking foot glows, hotter as the rally accelerates (the pose itself is
+	-- RiderKick's, driven by the Flying attribute).
+	local color = RiderKick.heatColor(payload.rally, payload.perfect)
+	local character = attacker.Character
+	local glow = if character then RiderKick.glow(character, color, math.clamp(payload.rally / 10, 0, 1)) else nil
+	if glow then
+		kickGlows[payload.kickId] = glow
+		addCleanup(payload.kickId, function()
+			kickGlows[payload.kickId] = nil
+			glow.destroy()
+		end)
+	end
+
+	-- Duel rally counter: "x2", "x3"... between the two fighters, bigger as it climbs.
+	local targetRoot = rootOf(Players:GetPlayerByUserId(payload.targetId))
+	if payload.rally >= 2 and targetRoot then
+		local midpoint = (root.Position + targetRoot.Position) / 2 + Vector3.new(0, 4, 0)
+		popup(midpoint, `x{payload.rally}`, color, math.clamp(30 + payload.rally * 2, 30, 56), 1.5)
+	end
 
 	-- With several fliers in the air, outline the ones kicking YOU until their kick resolves.
-	local character = attacker.Character
 	if payload.targetId == localPlayer.UserId and character then
 		local mark = Instance.new("Highlight")
 		mark.Name = "CK_KickingYou"
@@ -381,54 +506,217 @@ function CombatFX.onKickStarted(payload: Types.KickStartedPayload)
 	end
 end
 
--- Floating "-51" over the hit, bigger and redder the harder it hit.
-local function damageNumber(position: Vector3, damage: number, lethal: boolean)
-	local part = effectPart(position + Vector3.new(0, 2, 0))
-	local height = math.clamp(28 + damage * 0.35, 28, 64)
-	local gui = Instance.new("BillboardGui")
-	gui.Size = UDim2.fromOffset(height * 3.5, height)
-	gui.AlwaysOnTop = true
-	gui.LightInfluence = 0
-	gui.Parent = part
+--[[
+	The finishing strike: the victim explodes. A neon fireball and white core,
+	a ground shock ring, smoke, fire and embers, a flash of light and a camera
+	shake for anyone nearby. The body is hidden for EXPLOSION_HIDE_TIME (the
+	server moves the player to the lobby in the meantime). Purely local.
+]]
+local function explode(victim: Player?, position: Vector3, color: Color3)
+	local fireball = effectPart(position)
+	fireball.Shape = Enum.PartType.Ball
+	fireball.Material = Enum.Material.Neon
+	fireball.Color = color
+	fireball.Size = Vector3.one * 2
+	fireball.Transparency = 0.05
+	TweenService:Create(fireball, TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+		Size = Vector3.one * 20,
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(fireball, 0.6)
 
-	local text = Instance.new("TextLabel")
-	text.Size = UDim2.fromScale(1, 1)
-	text.BackgroundTransparency = 1
-	text.Font = Enum.Font.LuckiestGuy
-	text.TextScaled = true
-	text.Text = if lethal then `-{damage} KO!` else `-{damage}`
-	text.TextColor3 = if lethal
-		then PERFECT_COLOR
-		else Color3.fromRGB(255, 220, 90):Lerp(PERFECT_COLOR, math.clamp(damage / 100, 0, 1))
-	text.Parent = gui
-	local outline = Instance.new("UIStroke")
-	outline.Thickness = 3
-	outline.Color = Color3.fromRGB(40, 0, 0)
-	outline.Parent = text
+	local core = effectPart(position)
+	core.Shape = Enum.PartType.Ball
+	core.Material = Enum.Material.Neon
+	core.Color = Color3.new(1, 1, 1)
+	core.Size = Vector3.one * 3
+	TweenService:Create(core, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.one * 10,
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(core, 0.3)
 
-	TweenService:Create(gui, TweenInfo.new(1, Enum.EasingStyle.Quad), { StudsOffset = Vector3.new(0, 4, 0) }):Play()
-	local fade = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In, 0, false, 0.5)
-	TweenService:Create(text, fade, { TextTransparency = 1 }):Play()
-	TweenService:Create(outline, fade, { Transparency = 1 }):Play()
-	Debris:AddItem(part, 1.1)
+	shockRing(position - Vector3.new(0, 2.5, 0), Vector3.yAxis, color, 4, 40, 0.6)
+
+	local emitterPart = effectPart(position)
+	local smoke = Instance.new("ParticleEmitter")
+	smoke.Texture = SMOKE_TEXTURE
+	smoke.Color = ColorSequence.new(Color3.fromRGB(90, 85, 85), Color3.fromRGB(40, 38, 40))
+	smoke.Lifetime = NumberRange.new(1, 1.7)
+	smoke.Speed = NumberRange.new(6, 16)
+	smoke.SpreadAngle = Vector2.new(180, 180)
+	smoke.Drag = 3
+	smoke.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 4),
+		NumberSequenceKeypoint.new(1, 11),
+	})
+	smoke.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.25),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	smoke.Rate = 0
+	smoke.Parent = emitterPart
+	smoke:Emit(26)
+
+	local fire = Instance.new("ParticleEmitter")
+	fire.Texture = FIRE_TEXTURE
+	fire.Color = ColorSequence.new(Color3.fromRGB(255, 230, 160), color)
+	fire.LightEmission = 1
+	fire.Lifetime = NumberRange.new(0.35, 0.6)
+	fire.Speed = NumberRange.new(10, 24)
+	fire.SpreadAngle = Vector2.new(180, 180)
+	fire.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 5),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	fire.Rate = 0
+	fire.Parent = emitterPart
+	fire:Emit(34)
+
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Range = 40
+	light.Brightness = 10
+	light.Parent = emitterPart
+	TweenService:Create(light, TweenInfo.new(0.7), { Brightness = 0 }):Play()
+	Debris:AddItem(emitterPart, 2.2)
+
+	burst(position, color, 90, 60)
+	shakeCamera(position, 0.09, 0.45)
+
+	local character = victim and victim.Character
+	if character then
+		setBodyTransparency(character, 1)
+		task.delay(EXPLOSION_HIDE_TIME, function()
+			if victim and victim.Character == character then
+				setBodyTransparency(character, 0)
+			end
+		end)
+	end
 end
 
 function CombatFX.onKickResolved(payload: Types.KickResolvedPayload)
 	CombatFX.cleanupKick(payload.kickId)
 	if payload.outcome == "Parried" then
-		-- The clash: sparks where the feet met the block.
+		-- The clash: a shockwave off the block and sparks where the feet met it.
+		local color = if payload.perfect then PERFECT_COLOR else COLORS.Block
+		shockRing(payload.position, payload.direction, color, 3, 16, 0.25)
 		burst(payload.position, if payload.perfect then PERFECT_COLOR else KICK_COLOR, 40, 30)
 	elseif payload.outcome == "Clashed" then
-		-- Two kicks met head-on: a bigger white-hot burst, nobody takes damage.
+		-- Two kicks met head-on: a bigger white-hot burst, no strike for either.
+		shockRing(payload.position, payload.direction, Color3.fromRGB(255, 240, 200), 4, 22, 0.3)
 		burst(payload.position, Color3.fromRGB(255, 240, 200), 55, 40)
 	elseif payload.outcome == "Hit" then
-		burst(payload.position, Color3.fromRGB(255, 255, 255), 70, 45)
-		damageNumber(payload.position, payload.damage, payload.lethal)
+		local victim = Players:GetPlayerByUserId(payload.targetId)
+		local color = if payload.ultimate then COLORS.UltA else RiderKick.heatColor(payload.rally, payload.perfect)
+		if payload.exploded then
+			explode(victim, payload.position, color)
+		else
+			burst(payload.position, Color3.new(1, 1, 1), 70, 45)
+			shockRing(payload.position, payload.direction, color, 2, 12, 0.22)
+			local label = if payload.ultimate
+				then `ULTIMATE · STRIKE {payload.strikes}`
+				else `STRIKE {payload.strikes}`
+			popup(payload.position + Vector3.new(0, 2, 0), label, COLORS.Danger, 34, 4)
+		end
 		-- If YOU were hit, flash the attacker red: "that's who did it".
 		local attacker = Players:GetPlayerByUserId(payload.attackerId)
 		if payload.targetId == localPlayer.UserId and attacker and attacker.Character then
 			pulseHighlight(attacker.Character, PERFECT_COLOR, 1.5)
 		end
+	end
+end
+
+--[[
+	ULTIMATE telegraph.
+	  Leap: a gold aura on the performer (and the flip, via RiderKick).
+	  Dive: the impact zone on the ground, an outer ring plus an inner disc that
+	        fills it exactly as the dive lands. It sits on the floor below the
+	        locked point, so everyone sees where NOT to be.
+	  Miss / Cancelled / landed (KickResolved with the same id): cleaned up.
+]]
+function CombatFX.onUltimate(payload: Types.UltimatePayload)
+	local performer = Players:GetPlayerByUserId(payload.userId)
+	if payload.stage == "Leap" then
+		local character = performer and performer.Character
+		if performer and payload.diveAt then
+			RiderKick.startLeap(performer, payload.diveAt) -- (a re-sync only moves the dive time)
+		end
+		if character and not cleanups[payload.id] then
+			pulseHighlight(character, COLORS.UltA, Config.Ultimate.LeapTime + Config.Ultimate.DiveTime)
+			local glow = RiderKick.glow(character, COLORS.UltB, 1)
+			if glow then
+				addCleanup(payload.id, glow.destroy)
+			end
+		end
+		return
+	end
+
+	if performer then
+		RiderKick.endLeap(performer)
+	end
+	if payload.stage ~= "Dive" then
+		if payload.stage == "Miss" and payload.impactPoint then
+			burst(payload.impactPoint, Color3.fromRGB(200, 190, 170), 30, 20) -- a dusty thud
+		end
+		CombatFX.cleanupKick(payload.id)
+		return
+	end
+
+	local impact = payload.impactPoint
+	local impactAt = payload.impactAt
+	if impact == nil or impactAt == nil then
+		return
+	end
+	local previous = ultimateZones[payload.id]
+	if previous then
+		previous() -- a re-sync (the performer was briefly held): redraw with the new timing
+	else
+		addCleanup(payload.id, function()
+			local remove = ultimateZones[payload.id]
+			ultimateZones[payload.id] = nil
+			if remove then
+				remove()
+			end
+		end)
+	end
+	local radius = payload.radius or Config.Ultimate.Radius
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude: { Instance } = {}
+	for _, player in Players:GetPlayers() do
+		if player.Character then
+			table.insert(exclude, player.Character)
+		end
+	end
+	params.FilterDescendantsInstances = exclude
+	local floor = Workspace:Raycast(impact + Vector3.new(0, 2, 0), Vector3.new(0, -40, 0), params)
+	local center = if floor then floor.Position + Vector3.new(0, 0.06, 0) else impact - Vector3.new(0, 3, 0)
+	local flat = CFrame.new(center) * CFrame.Angles(0, 0, math.pi / 2) -- cylinder axis (X) pointing up
+
+	local zone = effectPart(center)
+	zone.Shape = Enum.PartType.Cylinder
+	zone.Material = Enum.Material.Neon
+	zone.Color = COLORS.Danger
+	zone.Transparency = 0.55
+	zone.Size = Vector3.new(0.12, radius * 2, radius * 2)
+	zone.CFrame = flat
+
+	local fill = effectPart(center)
+	fill.Shape = Enum.PartType.Cylinder
+	fill.Material = Enum.Material.Neon
+	fill.Color = COLORS.UltA
+	fill.Transparency = 0.25
+	fill.Size = Vector3.new(0.14, 0.5, 0.5)
+	fill.CFrame = flat
+	local remaining = math.max(impactAt - Workspace:GetServerTimeNow(), 0.05)
+	TweenService:Create(fill, TweenInfo.new(remaining, Enum.EasingStyle.Linear), {
+		Size = Vector3.new(0.14, radius * 2, radius * 2),
+	}):Play()
+
+	ultimateZones[payload.id] = function()
+		zone:Destroy()
+		fill:Destroy()
 	end
 end
 
@@ -450,22 +738,19 @@ function CombatFX.init(playerGui: PlayerGui)
 	gui.DisplayOrder = 20
 	gui.Parent = playerGui
 
-	local label = Instance.new("TextLabel")
+	local label = UiTheme.text(gui, UiTheme.FontHeavy, COLORS.Text)
 	label.Name = "Toast"
 	label.AnchorPoint = Vector2.new(0.5, 0.5)
 	label.Position = UDim2.fromScale(0.5, 0.32)
-	label.Size = UDim2.fromScale(0.42, 0.09)
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.LuckiestGuy
-	label.TextScaled = true
+	label.Size = UDim2.fromScale(0.42, 0.07)
 	label.TextTransparency = 1
-	label.Text = ""
-	label.Parent = gui
-	local stroke = Instance.new("UIStroke")
-	stroke.Thickness = 3
-	stroke.Color = Color3.fromRGB(40, 10, 0)
-	stroke.Parent = label
+	local textLimit = Instance.new("UITextSizeConstraint")
+	textLimit.MaxTextSize = 44
+	textLimit.Parent = label
+	local stroke = UiTheme.stroke(label, 1.5, Color3.new(0, 0, 0), 0.4)
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 	toastLabel = label
+	RiderKick.init()
 
 	Players.PlayerAdded:Connect(watchPlayer)
 	for _, player in Players:GetPlayers() do

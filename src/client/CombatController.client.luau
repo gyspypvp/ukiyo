@@ -8,24 +8,30 @@
 	  1. TARGETING: every frame, the camera dot-product lock-on picks the player
 	     closest to the crosshair and puts the red dot on them
 	     (Shared/Targeting.luau has the math).
-	  2. INPUT: Click / R2 = Kick, F / L1 = Block (parry), Q / Y = Ability.
-	     On-screen KICK / BLOCK / ABILITY buttons work on every platform and
-	     show their cooldowns. A Kick pressed while stunned or still cooling
-	     down is buffered briefly and fires the moment it's allowed.
+	  2. INPUT: five actions, each on a round on-screen button that shows its
+	     cooldown (built from UiTheme):
+	         KICK      Left click / R2   homing flying kick at the dot
+	         BLOCK     F / L1            parry the kick about to land
+	         DASH      Q / B             quick dodge burst (movement direction)
+	         SKILL     E / Y             your Leg Style, mid-kick
+	         ULTIMATE  R / X             charged, unblockable leap-and-dive kick
+	     A Kick pressed while stunned or still cooling down is buffered briefly
+	     and fires the moment it's allowed. Inside a DUEL (right after a parry
+	     you were part of) Block can be mashed freely, as the server allows.
 	  3. NETWORK: fires intent remotes. The client never decides an outcome; it
 	     reports WHAT it pressed and WHEN (synced server clock) and the server
 	     judges.
 	  4. VISUALS: the red "incoming" warning (edge glow + closing ring, plus an
 	     "x2" count when several kicks are coming) for the kick closest to
-	     landing, driven
-	     by the server's impact ETA on the shared clock rather than by the
-	     attacker's replicated position. The ring closes on the same moment the
-	     server will judge, even though the attacker's model you SEE is ~100 ms
-	     behind.
+	     landing, driven by the server's impact ETA on the shared clock rather
+	     than by the attacker's replicated position, so the ring closes on the
+	     same moment the server will judge. An ULTIMATE aimed at you prompts
+	     "DASH!" and lights up the DASH button instead: it can't be blocked.
 
 	Anti-exploit note: everything here is advisory. Editing this script (or
 	firing the remotes by hand) cannot kick during a cooldown, parry outside
-	the server's window, or move a server-owned flying body.
+	the server's window, dash further, charge the meter, or move a
+	server-owned body.
 ]]
 
 local Players = game:GetService("Players")
@@ -41,12 +47,14 @@ local Targeting = require(Shared:WaitForChild("Targeting"))
 local Types = require(Shared:WaitForChild("Types"))
 local CombatFX = require(script.Parent:WaitForChild("CombatFX"))
 local HitFeedback = require(script.Parent:WaitForChild("HitFeedback"))
+local UiTheme = require(script.Parent:WaitForChild("UiTheme"))
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui") :: PlayerGui
 local remotes = Net.client()
 local ATTR = Net.Attributes
 local STATE = Net.StateAttributes
+local COLORS = UiTheme.Colors
 local roundState = Net.stateFolder()
 
 --[[
@@ -61,8 +69,8 @@ end)
 -- How long before impact the warning ring starts closing (purely visual).
 local WARNING_LEAD = 1.0
 local LAUNCH_BUFFER = 0.75 -- a Kick pressed this long before it's allowed still fires
+local PARRY_MIN_INTERVAL = 1 / 15 -- mash cap, safely under the server's Parry rate limit
 local DOT_COLOR = Color3.fromRGB(255, 45, 45)
-local BUTTON_COLOR = Color3.fromRGB(40, 110, 230)
 
 type IncomingKick = {
 	kickId: number,
@@ -71,12 +79,22 @@ type IncomingKick = {
 	etaSentAt: number, -- newest KickUpdated applied (unreliable packets can arrive out of order)
 }
 
+type ActionButton = {
+	button: TextButton,
+	ring: UIStroke,
+	shade: UIGradient, -- cooldown shade: covers the remaining fraction, from the top
+	caption: TextLabel,
+	timer: TextLabel, -- cooldown seconds, ULTIMATE %, "MASH", ...
+	scale: UIScale,
+}
+
 type Hud = {
-	blockButton: TextButton,
-	blockCooldown: Frame,
-	abilityButton: TextButton,
-	kickButton: TextButton,
-	kickCooldown: Frame,
+	kick: ActionButton,
+	block: ActionButton,
+	dash: ActionButton,
+	skill: ActionButton,
+	ultimate: ActionButton,
+	ultFill: UIGradient,
 	ringCount: TextLabel,
 	warning: Frame,
 	warningStroke: UIStroke,
@@ -90,7 +108,10 @@ type Hud = {
 
 local lockTarget: Player? = nil
 local incomingKicks: { [number]: IncomingKick } = {} -- every kick aimed at us, by kick id
+local ultimateThreat: Types.UltimatePayload? = nil -- an ULTIMATE aimed at us (Leap or Dive)
 local parryLockUntil = 0 -- mirror of the server's whiff cooldown (server time)
+local duelUntil = 0 -- mirror of the server's duel window: misses cost nothing until then
+local lastParrySent = 0 -- os.clock() of the last Block sent (mash cap)
 local pendingLaunchUntil = 0 -- a buffered Kick fires if it becomes allowed before this (local clock)
 local requestLaunch: () -> () -- defined with the other input handlers below
 
@@ -111,6 +132,15 @@ local function rootOf(player: Player): BasePart?
 	return nil
 end
 
+local function isTrue(name: string): boolean
+	return localPlayer:GetAttribute(name) == true
+end
+
+local function numberAttr(name: string): number
+	local value = localPlayer:GetAttribute(name)
+	return if typeof(value) == "number" then value else 0
+end
+
 -- The kick aimed at us that will land first (frozen Lag Switch kicks count as last), and how many there are.
 local function soonestIncoming(): (IncomingKick?, number)
 	local soonest: IncomingKick? = nil
@@ -126,15 +156,27 @@ local function soonestIncoming(): (IncomingKick?, number)
 	return soonest, count
 end
 
+-- In the arena, the round is live, and not busy being a missile, stunned or mid-ULTIMATE.
+local function free(): boolean
+	local phase = roundState:GetAttribute(STATE.Phase)
+	return isTrue(ATTR.InArena)
+		and (phase == "Active" or phase == "FinalDuel") -- nothing during the spawn countdown
+		and not isTrue(ATTR.Flying)
+		and not isTrue(ATTR.Stunned)
+		and not isTrue(ATTR.Ultimate)
+end
+
 -- Can we start a kick right now? (The server re-checks all of this.)
 local function canKickNow(t: number): boolean
-	local phase = roundState:GetAttribute(STATE.Phase)
-	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
-	return localPlayer:GetAttribute(ATTR.InArena) == true
-		and (phase == "Active" or phase == "FinalDuel") -- no kicking during the spawn countdown
-		and localPlayer:GetAttribute(ATTR.Flying) ~= true
-		and localPlayer:GetAttribute(ATTR.Stunned) ~= true
-		and (typeof(readyAt) ~= "number" or t >= readyAt)
+	return free() and t >= numberAttr(ATTR.KickReadyAt)
+end
+
+local function canDashNow(t: number): boolean
+	return isTrue(ATTR.InArena)
+		and not isTrue(ATTR.Flying)
+		and not isTrue(ATTR.Stunned)
+		and not isTrue(ATTR.Ultimate)
+		and t >= numberAttr(ATTR.DashReadyAt)
 end
 
 local function isAliveCharacter(player: Player): boolean
@@ -143,65 +185,73 @@ local function isAliveCharacter(player: Player): boolean
 	return humanoid ~= nil and humanoid.Health > 0
 end
 
--- HUD (built in code so the place file needs no UI assets) -----------------------------------
+-- HUD (built in code from UiTheme, so the place file needs no UI assets) ---------------------
 
-local function corner(parent: GuiObject, radius: UDim)
-	local uiCorner = Instance.new("UICorner")
-	uiCorner.CornerRadius = radius
-	uiCorner.Parent = parent
-end
-
-local function stroke(parent: GuiObject, thickness: number, color: Color3): UIStroke
-	local uiStroke = Instance.new("UIStroke")
-	uiStroke.Thickness = thickness
-	uiStroke.Color = color
-	uiStroke.Parent = parent
-	return uiStroke
-end
-
--- Square action button in the style of the reference HUD: title above, glyph inside, key badge.
-local function actionButton(parent: Instance, title: string, glyph: string, key: string, xOffset: number): TextButton
+--[[
+	A round action button: glass disc, accent ring, the action's name inside,
+	a cooldown shade that retreats as it comes back, and (on keyboard / gamepad)
+	a small key hint under it.
+]]
+local function actionButton(parent: Instance, name: string, accent: Color3, diameter: number, key: string): ActionButton
 	local button = Instance.new("TextButton")
-	button.Name = title
-	button.AnchorPoint = Vector2.new(0.5, 1)
-	button.Position = UDim2.new(0.5, xOffset, 1, -24)
-	button.Size = UDim2.fromOffset(92, 92)
-	button.BackgroundColor3 = BUTTON_COLOR
-	button.AutoButtonColor = true
-	button.Font = Enum.Font.GothamBlack
-	button.Text = glyph
-	button.TextScaled = true
-	button.TextColor3 = Color3.new(1, 1, 1)
+	button.Name = name
+	button.Size = UDim2.fromOffset(diameter, diameter)
+	button.BackgroundColor3 = COLORS.Panel
+	button.BackgroundTransparency = UiTheme.PanelTransparency
+	button.AutoButtonColor = false
+	button.Text = ""
 	button.Parent = parent
-	corner(button, UDim.new(0, 12))
-	stroke(button, 3, Color3.new(1, 1, 1))
+	UiTheme.corner(button, UDim.new(0.5, 0))
+	local ring = UiTheme.stroke(button, 2.5, accent)
+	local scale = Instance.new("UIScale")
+	scale.Parent = button
 
-	local label = Instance.new("TextLabel")
-	label.AnchorPoint = Vector2.new(0.5, 1)
-	label.Position = UDim2.new(0.5, 0, 0, -2)
-	label.Size = UDim2.new(1.4, 0, 0, 26)
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.LuckiestGuy
-	label.Text = title
-	label.TextScaled = true
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.Parent = button
-	stroke(label, 2, Color3.fromRGB(10, 30, 70))
+	local shadeFrame = Instance.new("Frame")
+	shadeFrame.Name = "Cooldown"
+	shadeFrame.Size = UDim2.fromScale(1, 1)
+	shadeFrame.BackgroundColor3 = Color3.new(0, 0, 0)
+	shadeFrame.BackgroundTransparency = 0.4
+	shadeFrame.ZIndex = 3
+	shadeFrame.Parent = button
+	UiTheme.corner(shadeFrame, UDim.new(0.5, 0))
+	local shade = Instance.new("UIGradient")
+	shade.Rotation = 90 -- starts at the top: the shade covers the top part and retreats upward
+	shade.Parent = shadeFrame
+	UiTheme.setFill(shade, 0)
 
-	local badge = Instance.new("TextLabel")
-	badge.AnchorPoint = Vector2.new(1, 0)
-	badge.Position = UDim2.new(1, -4, 0, 4)
-	badge.Size = UDim2.fromOffset(24, 24)
-	badge.BackgroundColor3 = Color3.fromRGB(15, 25, 50)
-	badge.Font = Enum.Font.GothamBlack
-	badge.Text = key
-	badge.TextScaled = true
-	badge.TextColor3 = Color3.new(1, 1, 1)
-	badge.Visible = key ~= ""
-	badge.Parent = button
-	corner(badge, UDim.new(0, 6))
+	local caption = UiTheme.text(button, UiTheme.FontHeavy, COLORS.Text)
+	caption.Name = "Caption"
+	caption.AnchorPoint = Vector2.new(0.5, 0.5)
+	caption.Position = UDim2.fromScale(0.5, 0.46)
+	caption.Size = UDim2.fromScale(0.74, 0.22)
+	caption.Text = name
+	caption.ZIndex = 4
 
-	return button
+	local timer = UiTheme.text(button, UiTheme.Font, COLORS.SubText)
+	timer.Name = "Timer"
+	timer.AnchorPoint = Vector2.new(0.5, 0)
+	timer.Position = UDim2.fromScale(0.5, 0.6)
+	timer.Size = UDim2.fromScale(0.6, 0.16)
+	timer.ZIndex = 4
+
+	if key ~= "" then
+		local hint = UiTheme.panel(button, "Key", UDim.new(0, 6))
+		hint.AnchorPoint = Vector2.new(0.5, 0)
+		hint.Position = UDim2.new(0.5, 0, 1, 5)
+		hint.Size = UDim2.fromOffset(36, 17)
+		local hintText = UiTheme.text(hint, UiTheme.Font, COLORS.SubText, 11)
+		hintText.Size = UDim2.fromScale(1, 1)
+		hintText.Text = key
+	end
+
+	return {
+		button = button,
+		ring = ring,
+		shade = shade,
+		caption = caption,
+		timer = timer,
+		scale = scale,
+	}
 end
 
 local function buildHud(): Hud
@@ -212,38 +262,58 @@ local function buildHud(): Hud
 	gui.Parent = playerGui
 
 	local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-	local kickButton = actionButton(gui, "KICK", "⚡", if touchOnly then "" else "LMB", -116)
-	kickButton.BackgroundColor3 = Color3.fromRGB(230, 70, 40)
-	local blockButton = actionButton(gui, "BLOCK", "🛡", if touchOnly then "" else "F", 0)
-	local abilityButton = actionButton(gui, "ABILITY", "»", if touchOnly then "" else "Q", 116)
-	if touchOnly then
-		-- Phones/tablets: every action under the RIGHT thumb. The left of the screen
-		-- belongs to the movement thumbstick, and the cluster's right edge (W-184)
-		-- stays clear of Roblox's Jump button on both phone and tablet layouts.
-		for _, button in { kickButton, blockButton, abilityButton } do
-			button.AnchorPoint = Vector2.new(1, 1)
-		end
-		kickButton.Position = UDim2.new(1, -184, 1, -36)
-		blockButton.Position = UDim2.new(1, -288, 1, -36)
-		abilityButton.Position = UDim2.new(1, -184, 1, -160)
+	local function key(text: string): string
+		return if touchOnly then "" else text
 	end
+	local block = actionButton(gui, "BLOCK", COLORS.Block, if touchOnly then 84 else 76, key("F"))
+	local kick = actionButton(gui, "KICK", COLORS.Kick, if touchOnly then 84 else 76, key("LMB"))
+	local dash = actionButton(gui, "DASH", COLORS.Dash, if touchOnly then 60 else 62, key("Q"))
+	local skill = actionButton(gui, "SKILL", COLORS.Skill, if touchOnly then 60 else 62, key("E"))
+	local ultimate = actionButton(gui, "ULT", COLORS.UltA, if touchOnly then 66 else 70, key("R"))
 
-	-- Cooldown shades that drain away as each action becomes available again.
-	local function cooldownShade(button: TextButton): Frame
-		local shade = Instance.new("Frame")
-		shade.Name = "Cooldown"
-		shade.AnchorPoint = Vector2.new(0, 1)
-		shade.Position = UDim2.fromScale(0, 1)
-		shade.Size = UDim2.fromScale(1, 0)
-		shade.BackgroundColor3 = Color3.new(0, 0, 0)
-		shade.BackgroundTransparency = 0.45
-		shade.Active = false
-		shade.Parent = button
-		corner(shade, UDim.new(0, 12))
-		return shade
+	-- The ULTIMATE meter: a gradient fill that rises inside its button as it charges.
+	local fillFrame = Instance.new("Frame")
+	fillFrame.Name = "Charge"
+	fillFrame.Size = UDim2.fromScale(1, 1)
+	fillFrame.BackgroundColor3 = Color3.new(1, 1, 1)
+	fillFrame.BackgroundTransparency = 0.35
+	fillFrame.ZIndex = 2
+	fillFrame.Parent = ultimate.button
+	UiTheme.corner(fillFrame, UDim.new(0.5, 0))
+	local ultFill = Instance.new("UIGradient")
+	ultFill.Rotation = -90 -- starts at the bottom: fills upward
+	ultFill.Color = ColorSequence.new(COLORS.UltA, COLORS.UltB)
+	ultFill.Parent = fillFrame
+	UiTheme.setFill(ultFill, 0)
+
+	if touchOnly then
+		-- Phones/tablets: everything under the RIGHT thumb, two rows. The left of the
+		-- screen belongs to the movement thumbstick, and the cluster's right edge
+		-- (W-184) stays clear of Roblox's Jump button on both phone and tablet layouts.
+		for _, action in { block, kick, dash, skill, ultimate } do
+			action.button.AnchorPoint = Vector2.new(1, 1)
+		end
+		kick.button.Position = UDim2.new(1, -184, 1, -28)
+		block.button.Position = UDim2.new(1, -282, 1, -28)
+		ultimate.button.Position = UDim2.new(1, -184, 1, -128)
+		skill.button.Position = UDim2.new(1, -262, 1, -132)
+		dash.button.Position = UDim2.new(1, -334, 1, -132)
+	else
+		-- Keyboard / gamepad: one centred row, bottoms aligned, key hints underneath.
+		local row = { block, kick, dash, skill, ultimate }
+		local gap = 14
+		local total = -gap
+		for _, action in row do
+			total += action.button.Size.X.Offset + gap
+		end
+		local x = -total / 2
+		for _, action in row do
+			local width = action.button.Size.X.Offset
+			action.button.AnchorPoint = Vector2.new(0.5, 1)
+			action.button.Position = UDim2.new(0.5, x + width / 2, 1, -36)
+			x += width + gap
+		end
 	end
-	local blockCooldown = cooldownShade(blockButton)
-	local kickCooldown = cooldownShade(kickButton)
 
 	-- Red warning: screen-edge glow + a ring that closes toward the impact moment.
 	local warning = Instance.new("Frame")
@@ -251,9 +321,8 @@ local function buildHud(): Hud
 	warning.Size = UDim2.fromScale(1, 1)
 	warning.BackgroundTransparency = 1
 	warning.Visible = false
-	warning.Active = false
 	warning.Parent = gui
-	local warningStroke = stroke(warning, 22, DOT_COLOR)
+	local warningStroke = UiTheme.stroke(warning, 14, COLORS.Danger)
 
 	local ring = Instance.new("Frame")
 	ring.Name = "Ring"
@@ -262,32 +331,15 @@ local function buildHud(): Hud
 	ring.Size = UDim2.fromOffset(240, 240)
 	ring.BackgroundTransparency = 1
 	ring.Parent = warning
-	corner(ring, UDim.new(0.5, 0))
-	local ringStroke = stroke(ring, 4, DOT_COLOR)
-
-	local bang = Instance.new("TextLabel")
-	bang.AnchorPoint = Vector2.new(0.5, 1)
-	bang.Position = UDim2.new(0.5, 0, 0, -6)
-	bang.Size = UDim2.fromOffset(40, 40)
-	bang.BackgroundTransparency = 1
-	bang.Font = Enum.Font.LuckiestGuy
-	bang.Text = "!"
-	bang.TextScaled = true
-	bang.TextColor3 = DOT_COLOR
-	bang.Parent = ring
+	UiTheme.corner(ring, UDim.new(0.5, 0))
+	local ringStroke = UiTheme.stroke(ring, 3, COLORS.Danger)
 
 	-- "x2", "x3": how many kicks are coming at you right now.
-	local ringCount = Instance.new("TextLabel")
+	local ringCount = UiTheme.text(ring, UiTheme.FontHeavy, COLORS.Danger, 22)
 	ringCount.AnchorPoint = Vector2.new(0, 0.5)
-	ringCount.Position = UDim2.new(1, 8, 0.5, 0) -- beside the ring, never down on the buttons
+	ringCount.Position = UDim2.new(1, 10, 0.5, 0) -- beside the ring, never down on the buttons
 	ringCount.Size = UDim2.fromOffset(60, 30)
-	ringCount.BackgroundTransparency = 1
-	ringCount.Font = Enum.Font.LuckiestGuy
-	ringCount.TextScaled = true
-	ringCount.TextColor3 = DOT_COLOR
-	ringCount.Text = ""
-	ringCount.Parent = ring
-	stroke(ringCount, 2, Color3.fromRGB(40, 0, 0))
+	ringCount.TextXAlignment = Enum.TextXAlignment.Left
 
 	-- The red lock-on dot, drawn ON the target (not at screen centre).
 	local lockDot = Instance.new("BillboardGui")
@@ -304,15 +356,16 @@ local function buildHud(): Hud
 	lockDotFill.Size = UDim2.fromScale(1, 1)
 	lockDotFill.BackgroundColor3 = DOT_COLOR
 	lockDotFill.Parent = lockDot
-	corner(lockDotFill, UDim.new(0.5, 0))
-	stroke(lockDotFill, 2, Color3.new(1, 1, 1))
+	UiTheme.corner(lockDotFill, UDim.new(0.5, 0))
+	UiTheme.stroke(lockDotFill, 2, Color3.new(1, 1, 1))
 
 	return {
-		blockButton = blockButton,
-		blockCooldown = blockCooldown,
-		abilityButton = abilityButton,
-		kickButton = kickButton,
-		kickCooldown = kickCooldown,
+		kick = kick,
+		block = block,
+		dash = dash,
+		skill = skill,
+		ultimate = ultimate,
+		ultFill = ultFill,
 		ringCount = ringCount,
 		warning = warning,
 		warningStroke = warningStroke,
@@ -344,7 +397,7 @@ end
 
 local function updateTargeting(camera: Camera)
 	local myRoot = rootOf(localPlayer)
-	if myRoot == nil or localPlayer:GetAttribute(ATTR.InArena) ~= true then
+	if myRoot == nil or not isTrue(ATTR.InArena) then
 		lockTarget = nil
 		hud.lockDot.Enabled = false
 		return
@@ -387,7 +440,7 @@ local function updateTargeting(camera: Camera)
 	hud.lockDotFill.BackgroundTransparency = if ready then 0 else 0.45
 end
 
--- 4. VISUALS: the incoming warning ---------------------------------------------------------
+-- 4. VISUALS: the incoming warning and the buttons -----------------------------------------
 
 local function updateWarning(t: number)
 	local kick, count = soonestIncoming()
@@ -412,25 +465,62 @@ local function updateWarning(t: number)
 	local size = 240 - 184 * urgency -- 240 px -> 56 px at impact
 	hud.ring.Size = UDim2.fromOffset(size, size)
 	hud.ringStroke.Transparency = 0.7 * (1 - urgency)
-	hud.warningStroke.Transparency = 0.85 - 0.75 * urgency
+	hud.warningStroke.Transparency = 0.88 - 0.72 * urgency
+end
+
+-- Shade + dimming + timer text for a button on a cooldown that ends at `readyAt`.
+local function showCooldown(action: ActionButton, t: number, readyAt: number, duration: number, usable: boolean)
+	local remaining = math.max(readyAt - t, 0)
+	UiTheme.setFill(action.shade, if duration > 0 then remaining / duration else 0)
+	action.timer.Text = if remaining > 0.05 then string.format("%.1f", remaining) else ""
+	action.button.BackgroundTransparency = if usable then UiTheme.PanelTransparency else 0.55
+	action.ring.Transparency = if usable then 0 else 0.55
 end
 
 local function updateButtons(t: number)
-	local remaining = math.max(parryLockUntil - t, 0)
-	hud.blockCooldown.Size = UDim2.fromScale(1, math.clamp(remaining / Config.Parry.WhiffCooldown, 0, 1))
-
-	local inArena = localPlayer:GetAttribute(ATTR.InArena) == true
-	local flying = localPlayer:GetAttribute(ATTR.Flying) == true
-	hud.abilityButton.BackgroundTransparency = if flying then 0 else 0.45
+	local inArena = isTrue(ATTR.InArena)
 	-- Combat buttons only exist in the arena; the lobby is for shopping and spectating.
-	hud.kickButton.Visible = inArena
-	hud.blockButton.Visible = inArena
-	hud.abilityButton.Visible = inArena
+	for _, action in { hud.kick, hud.block, hud.dash, hud.skill, hud.ultimate } do
+		action.button.Visible = inArena
+	end
+	if not inArena then
+		return
+	end
 
-	local readyAt = localPlayer:GetAttribute(ATTR.KickReadyAt)
-	local kickRemaining = if typeof(readyAt) == "number" then math.max(readyAt - t, 0) else 0
-	hud.kickCooldown.Size = UDim2.fromScale(1, math.clamp(kickRemaining / Config.Kick.Cooldown, 0, 1))
-	hud.kickButton.BackgroundTransparency = if canKickNow(t) then 0 else 0.55
+	showCooldown(hud.kick, t, numberAttr(ATTR.KickReadyAt), Config.Kick.Cooldown, canKickNow(t))
+
+	-- BLOCK: the whiff lockout, or "MASH" while a duel makes misses free.
+	local dueling = t < duelUntil
+	showCooldown(hud.block, t, if dueling then 0 else parryLockUntil, Config.Parry.WhiffCooldown, true)
+	if dueling then
+		hud.block.timer.Text = "MASH"
+		hud.block.ring.Thickness = 2.5 + 2 * (0.5 + 0.5 * math.sin(t * 30))
+	else
+		hud.block.ring.Thickness = 2.5
+	end
+
+	-- DASH: pulses when an ULTIMATE's marker is on you (Block can't stop that one).
+	showCooldown(hud.dash, t, numberAttr(ATTR.DashReadyAt), Config.Dash.Cooldown, canDashNow(t))
+	local threat = ultimateThreat
+	local mustDodge = threat ~= nil and threat.stage == "Dive"
+	hud.dash.scale.Scale = if mustDodge then 1.08 + 0.06 * math.sin(t * 24) else 1
+	hud.dash.ring.Thickness = if mustDodge then 4.5 else 2.5
+
+	-- SKILL: only usable mid-kick (once per kick, server-checked).
+	showCooldown(hud.skill, t, 0, 0, isTrue(ATTR.Flying))
+
+	-- ULTIMATE: the meter fills the button; full = pulsing ring.
+	local charge = numberAttr(ATTR.UltCharge)
+	UiTheme.setFill(hud.ultFill, charge)
+	local ready = charge >= 1
+	hud.ultimate.timer.Text = if isTrue(ATTR.Ultimate)
+		then "GO"
+		elseif ready then "READY"
+		else `{math.floor(charge * 100)}%`
+	hud.ultimate.timer.TextColor3 = if ready then COLORS.Text else COLORS.SubText
+	hud.ultimate.ring.Color = if ready then COLORS.UltA:Lerp(COLORS.UltB, 0.5 + 0.5 * math.sin(t * 6)) else COLORS.UltA
+	hud.ultimate.ring.Thickness = if ready then 3.5 else 2.5
+	hud.ultimate.button.BackgroundTransparency = if ready and free() then UiTheme.PanelTransparency else 0.45
 end
 
 RunService:BindToRenderStep("ClashKickCombat", Enum.RenderPriority.Camera.Value + 1, function()
@@ -457,7 +547,7 @@ end)
 -- Kick: anyone, any time (one kick in the air at a time, short cooldown). Sends WHO
 -- the dot is on plus the camera, so the server can re-run the same dot-product check.
 function requestLaunch()
-	if localPlayer:GetAttribute(ATTR.InArena) ~= true or localPlayer:GetAttribute(ATTR.Flying) == true then
+	if not isTrue(ATTR.InArena) or isTrue(ATTR.Flying) or isTrue(ATTR.Ultimate) then
 		return
 	end
 	if not canKickNow(serverNow()) then
@@ -469,7 +559,7 @@ function requestLaunch()
 	local camera = Workspace.CurrentCamera
 	local target = lockTarget
 	if target == nil or camera == nil then
-		CombatFX.toast("NO TARGET", Color3.fromRGB(200, 200, 200))
+		CombatFX.toast("NO TARGET", COLORS.SubText)
 		return
 	end
 	remotes.RequestLaunch:FireServer(target.UserId, camera.CFrame)
@@ -483,28 +573,76 @@ end
 	    measured latency, so lying here buys nothing),
 	  * whoever our lock-on dot is on, for the server to use as a redirect
 	    if it differs from the attacker.
+	Mid-duel there is no lockout to mirror, so presses go straight through
+	(capped at PARRY_MIN_INTERVAL, under the server's rate limit).
 ]]
 local function requestParry()
-	if localPlayer:GetAttribute(ATTR.InArena) ~= true then
+	if not isTrue(ATTR.InArena) or isTrue(ATTR.Ultimate) then
+		return -- (mid-ULTIMATE you're committed: the server ignores Block)
+	end
+	local clock = os.clock()
+	if clock - lastParrySent < PARRY_MIN_INTERVAL then
 		return
 	end
 	local t = serverNow()
-	if t < parryLockUntil then
+	local dueling = t < duelUntil
+	if t < parryLockUntil and not dueling then
 		return -- still in whiff cooldown; the shaded button shows it
 	end
 	local kick = soonestIncoming() -- the server answers the kick closest to landing too
-	if kick == nil then
+	if kick == nil and not dueling then
 		-- Optimistic mirror of the server's whiff lock; ParryFeedback corrects it either way.
 		parryLockUntil = t + Config.Parry.WhiffCooldown
 	end
+	lastParrySent = clock
 	remotes.RequestParry:FireServer(if kick then kick.kickId else 0, t, if lockTarget then lockTarget.UserId else nil)
 	CombatFX.parrySwing(localPlayer)
 end
 
-local function requestAbility()
-	if localPlayer:GetAttribute(ATTR.Flying) == true then
+-- Dash where you're moving (thumbstick / WASD), or where the camera faces if standing still.
+local function requestDash()
+	if not canDashNow(serverNow()) then
+		return
+	end
+	local character = localPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local direction = if humanoid then humanoid.MoveDirection else Vector3.zero
+	if direction.Magnitude < 0.1 then
+		local camera = Workspace.CurrentCamera
+		local look = if camera then camera.CFrame.LookVector else Vector3.zero
+		direction = Vector3.new(look.X, 0, look.Z)
+	end
+	remotes.RequestDash:FireServer(direction)
+end
+
+-- SKILL: the equipped Leg Style, mid-kick only.
+local function requestSkill()
+	if isTrue(ATTR.Flying) then
 		remotes.RequestAbility:FireServer()
 	end
+end
+
+-- ULTIMATE: needs a full meter and a target on the dot within ULTIMATE range.
+local function requestUltimate()
+	if not free() then
+		return
+	end
+	if numberAttr(ATTR.UltCharge) < 1 then
+		CombatFX.toast("ULTIMATE CHARGING", COLORS.SubText)
+		return
+	end
+	local camera = Workspace.CurrentCamera
+	local target = lockTarget
+	if target == nil or camera == nil then
+		CombatFX.toast("NO TARGET", COLORS.SubText)
+		return
+	end
+	local myRoot, targetRoot = rootOf(localPlayer), rootOf(target)
+	if myRoot and targetRoot and (targetRoot.Position - myRoot.Position).Magnitude > Config.Ultimate.MaxRange then
+		CombatFX.toast("TOO FAR", COLORS.SubText)
+		return
+	end
+	remotes.RequestUltimate:FireServer(target.UserId, camera.CFrame)
 end
 
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
@@ -516,24 +654,30 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 		requestLaunch()
 	elseif keyCode == Enum.KeyCode.F or keyCode == Enum.KeyCode.ButtonL1 then
 		requestParry()
-	elseif keyCode == Enum.KeyCode.Q or keyCode == Enum.KeyCode.ButtonY then
-		requestAbility()
+	elseif keyCode == Enum.KeyCode.Q or keyCode == Enum.KeyCode.ButtonB then
+		requestDash()
+	elseif keyCode == Enum.KeyCode.E or keyCode == Enum.KeyCode.ButtonY then
+		requestSkill()
+	elseif keyCode == Enum.KeyCode.R or keyCode == Enum.KeyCode.ButtonX then
+		requestUltimate()
 	end
 end)
 
 -- On-screen buttons fire on PRESS (InputBegan), not release: parry timing is
 -- measured in tens of milliseconds and a tap's release can come 100 ms later.
-local function onPress(button: GuiButton, action: () -> ())
-	button.InputBegan:Connect(function(input: InputObject)
+local function onPress(action: ActionButton, handler: () -> ())
+	action.button.InputBegan:Connect(function(input: InputObject)
 		local inputType = input.UserInputType
 		if inputType == Enum.UserInputType.Touch or inputType == Enum.UserInputType.MouseButton1 then
-			action()
+			handler()
 		end
 	end)
 end
-onPress(hud.blockButton, requestParry)
-onPress(hud.abilityButton, requestAbility)
-onPress(hud.kickButton, requestLaunch)
+onPress(hud.kick, requestLaunch)
+onPress(hud.block, requestParry)
+onPress(hud.dash, requestDash)
+onPress(hud.skill, requestSkill)
+onPress(hud.ultimate, requestUltimate)
 
 -- SERVER -> CLIENT ---------------------------------------------------------------------------
 
@@ -563,29 +707,49 @@ end)
 
 remotes.KickResolved.OnClientEvent:Connect(function(payload: Types.KickResolvedPayload)
 	incomingKicks[payload.kickId] = nil
+	local threat = ultimateThreat
+	if threat and threat.id == payload.kickId then
+		ultimateThreat = nil
+	end
+
+	local mine = payload.attackerId == localPlayer.UserId or payload.targetId == localPlayer.UserId
+	if payload.outcome == "Parried" and mine then
+		-- We're in a duel now: mirror the server's free-mash window.
+		duelUntil = serverNow() + Config.Duel.SpamWindow
+	end
 
 	-- Head-on: we kicked each other. Each kick resolves separately, so only toast for the one we threw.
 	if payload.outcome == "Clashed" and payload.attackerId == localPlayer.UserId then
 		CombatFX.toast("CLASH!", Color3.fromRGB(255, 230, 160))
 	end
 
-	if payload.outcome == "Hit" and payload.targetId == localPlayer.UserId and payload.lethal then
-		-- Cosmetic KO fling. We own our character's physics, so we launch ourselves;
-		-- the server has already eliminated us and will teleport us to the lobby.
-		-- (A hit you survive is a server-side tumble instead.)
-		local root = rootOf(localPlayer)
-		local character = localPlayer.Character
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if root and humanoid then
-			humanoid:ChangeState(Enum.HumanoidStateType.FallingDown)
-			local fling = Config.Kick.HitFlingSpeed
-			root.AssemblyLinearVelocity = payload.direction * fling + Vector3.new(0, fling * 0.6, 0)
+	-- An exploded player's body is hidden by CombatFX for everyone (the server moves
+	-- them to the lobby); a strike you survive is a server-side tumble.
+	CombatFX.onKickResolved(payload)
+	-- Hit card: who hit you, which strike it was, why (held back on short screens while more kicks are coming).
+	HitFeedback.onKickResolved(payload, next(incomingKicks) ~= nil)
+end)
+
+remotes.Ultimate.OnClientEvent:Connect(function(payload: Types.UltimatePayload)
+	CombatFX.onUltimate(payload)
+	if payload.targetId ~= localPlayer.UserId then
+		return
+	end
+	if payload.stage == "Leap" then
+		ultimateThreat = payload
+		CombatFX.toast("ULTIMATE INCOMING", COLORS.UltA)
+	elseif payload.stage == "Dive" then
+		ultimateThreat = payload
+		CombatFX.toast("DASH!", COLORS.Dash) -- unblockable: get out of the marked zone
+	else
+		local threat = ultimateThreat
+		if threat and threat.id == payload.id then
+			ultimateThreat = nil
+		end
+		if payload.stage == "Miss" then
+			CombatFX.toast("DODGED!", COLORS.Dash)
 		end
 	end
-
-	CombatFX.onKickResolved(payload)
-	-- Hit card: who hit you, how much, why (held back on short screens while more kicks are coming).
-	HitFeedback.onKickResolved(payload, next(incomingKicks) ~= nil)
 end)
 
 remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPayload)
@@ -594,19 +758,20 @@ end)
 
 local FEEDBACK_TEXT: { [Types.ParryResult]: { text: string, color: Color3 } } = {
 	Perfect = { text = "PERFECT!", color = Color3.fromRGB(255, 50, 70) },
-	Parry = { text = "PARRY!", color = Color3.fromRGB(110, 200, 255) },
-	Early = { text = "TOO EARLY", color = Color3.fromRGB(200, 200, 200) },
-	Late = { text = "TOO LATE", color = Color3.fromRGB(200, 200, 200) },
-	NoThreat = { text = "WHIFF", color = Color3.fromRGB(170, 170, 170) },
-	TooFar = { text = "TOO FAR", color = Color3.fromRGB(200, 200, 200) },
-	Cooldown = { text = "", color = Color3.new(1, 1, 1) },
+	Parry = { text = "PARRY!", color = COLORS.Block },
+	Early = { text = "TOO EARLY", color = COLORS.SubText },
+	Late = { text = "TOO LATE", color = COLORS.SubText },
+	NoThreat = { text = "WHIFF", color = COLORS.SubText },
+	TooFar = { text = "TOO FAR", color = COLORS.SubText },
+	Cooldown = { text = "", color = COLORS.Text },
 }
 
 remotes.ParryFeedback.OnClientEvent:Connect(function(payload: Types.ParryFeedbackPayload)
 	-- The server's lockUntil is authoritative; this also undoes a wrong optimistic lock.
 	parryLockUntil = payload.lockUntil
 	local feedback = FEEDBACK_TEXT[payload.result]
-	if feedback and feedback.text ~= "" then
+	-- Mid-duel the counter-dash itself is the feedback; a toast per mashed parry is noise.
+	if feedback and feedback.text ~= "" and serverNow() >= duelUntil then
 		CombatFX.toast(feedback.text, feedback.color)
 	end
 end)
@@ -616,9 +781,11 @@ remotes.Effect.OnClientEvent:Connect(function(payload: Types.EffectPayload)
 end)
 
 localPlayer:GetAttributeChangedSignal(ATTR.InArena):Connect(function()
-	if localPlayer:GetAttribute(ATTR.InArena) ~= true then
+	if not isTrue(ATTR.InArena) then
 		table.clear(incomingKicks)
+		ultimateThreat = nil
 		lockTarget = nil
 		pendingLaunchUntil = 0
+		duelUntil = 0
 	end
 end)

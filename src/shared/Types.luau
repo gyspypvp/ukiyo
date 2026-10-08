@@ -24,7 +24,7 @@ export type KickStartedPayload = {
 	perfect: boolean, -- launched by a Perfect parry (red aura)
 }
 
--- Clashed: two players kicked EACH OTHER and met head-on; both bounce apart, no damage.
+-- Clashed: two players kicked EACH OTHER and met head-on; both bounce apart, no strike.
 export type KickOutcome = "Parried" | "Hit" | "Clashed" | "Cancelled"
 
 -- Server -> all clients when a kick ends.
@@ -36,12 +36,12 @@ export type KickResolvedPayload = {
 	perfect: boolean, -- Parried: the parry was Perfect. Hit: the kick was a Perfect counter-dash (hits harder)
 	direction: Vector3, -- flight direction at the end (used for the KO fling / spark)
 	position: Vector3, -- contact point
-	-- Why the hit hurt as much as it did (shown on the victim's hit card):
+	-- Context for the victim's hit card:
 	rally: number, -- parries in the rally that produced this kick
 	speed: number, -- studs/s of this kick
-	damage: number, -- HP taken (0 unless outcome == "Hit")
-	health: number, -- target's HP after the kick
-	lethal: boolean, -- this hit eliminated the target
+	strikes: number, -- target's strikes after this kick (a "Hit" adds one, an ULTIMATE more)
+	exploded: boolean, -- this was the finishing strike: the target explodes
+	ultimate: boolean, -- landed by an ULTIMATE (unblockable, worth Config.Ultimate.Strikes)
 }
 
 export type ParryResult = "Parry" | "Perfect" | "Early" | "Late" | "NoThreat" | "Cooldown" | "TooFar"
@@ -65,6 +65,21 @@ export type EffectPayload = {
 	realLane: number?, -- ShadowClone: lane of the real hitbox (-1, 0, 1)
 	spread: number?, -- ShadowClone: lateral studs between lanes
 	initialGap: number?, -- ShadowClone: gap at activation (lanes converge as it shrinks)
+}
+
+export type UltimateStage = "Leap" | "Dive" | "Miss" | "Cancelled"
+
+-- Server -> all clients: an ULTIMATE's telegraph. A landed ultimate arrives as a
+-- KickResolvedPayload with ultimate = true (same id), so hit feedback is shared.
+export type UltimatePayload = {
+	stage: UltimateStage,
+	id: number, -- shares the kick id space
+	userId: number, -- the player performing it
+	targetId: number,
+	diveAt: number?, -- Leap: server time the dive begins
+	impactPoint: Vector3?, -- Dive / Miss: where it lands
+	impactAt: number?, -- Dive: server time it lands
+	radius: number?, -- Dive: hit radius around impactPoint
 }
 
 export type RoundEventKind = "Winner" | "Draw" | "Eliminated" | "NoContest"

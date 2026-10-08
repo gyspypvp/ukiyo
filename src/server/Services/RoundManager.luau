@@ -253,14 +253,14 @@ local function runActive(round: Round, ctx: RoundContext): RoundResult
 			return result
 		end
 		if now() - startedAt > Config.Round.MaxActiveTime then
-			-- Out of time: the healthiest survivor(s) win, rather than a NO CONTEST that
-			-- erases a long round. An exact tie shares the payout (and refunds bets).
-			local best, winners = -1, {}
+			-- Out of time: the survivor(s) with the fewest strikes win, rather than a NO
+			-- CONTEST that erases a long round. An exact tie shares the payout (and refunds bets).
+			local best, winners = math.huge, {}
 			for _, player in ctx.getAlive() do
-				local health = CombatService.getHealth(player) or 0
-				if health > best then
-					best, winners = health, { player }
-				elseif health == best then
+				local strikes = CombatService.getStrikes(player) or math.huge
+				if strikes < best then
+					best, winners = strikes, { player }
+				elseif strikes == best then
 					table.insert(winners, player)
 				end
 			end
@@ -295,7 +295,7 @@ local function finishRound(round: Round, ctx: RoundContext, result: RoundResult)
 			PlayerDataService.addCoins(participant, Config.Rewards.Participation)
 		end
 	end
-	-- A timeout is decided by visible HP, so a last-second bet on the leader would be
+	-- A timeout is decided by visible strikes, so a last-second bet on the leader would be
 	-- free money: refund every bet on a timeout, pay out only real last-standing wins.
 	BettingService.settle(if #winners == 1 and result.reason ~= "Timeout" then winners[1] else nil)
 
@@ -424,8 +424,8 @@ function RoundManager.init(netRemotes: Net.Remotes)
 		end
 	end)
 
-	-- A kick landed but the victim survived: pay the attacker, let the mode react.
-	CombatService.Damaged:Connect(function(victim: Player, attacker: Player, damage: number, health: number)
+	-- A strike landed but the victim survived it: pay the attacker, let the mode react.
+	CombatService.Struck:Connect(function(victim: Player, attacker: Player, strikes: number)
 		local round, ctx = currentRound, currentContext
 		if round == nil or ctx == nil or not round.running or not round.alive[victim] then
 			return
@@ -433,7 +433,7 @@ function RoundManager.init(netRemotes: Net.Remotes)
 		if attacker.Parent then
 			PlayerDataService.addCoins(attacker, Config.Rewards.CoinsPerHit)
 		end
-		round.mode:onDamaged(ctx, victim, attacker, damage, health)
+		round.mode:onStruck(ctx, victim, attacker, strikes)
 	end)
 
 	-- Combat -> economy + mode

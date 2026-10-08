@@ -4,9 +4,10 @@
 	========================================================================
 	Round presentation, driven by the replicated ClashKickState attributes:
 
-	  * phase banner + countdown ("INTERMISSION 0:12", "ALIVE 7", "FINAL DUEL")
+	  * phase pill + countdown ("INTERMISSION 0:12", "ALIVE 7", "FINAL DUEL")
 	  * Final Duel: camera FOV widens and the music intensifies
-	  * "<NAME> WINS!" banner and a small KO feed
+	  * "<NAME> WINS!" banner and a small kill feed ("A exploded B")
+	All of it in the shared UiTheme style.
 
 	Music is optional: put a Folder named "ClashKickMusic" in SoundService with
 	Sounds named "Lobby", "Battle" and "Duel". Missing sounds are skipped.
@@ -23,12 +24,14 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
 local Net = require(Shared:WaitForChild("Net"))
 local Types = require(Shared:WaitForChild("Types"))
+local UiTheme = require(script.Parent:WaitForChild("UiTheme"))
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui") :: PlayerGui
 local remotes = Net.client()
 local state = Net.stateFolder()
 local STATE = Net.StateAttributes
+local COLORS = UiTheme.Colors
 
 local PHASE_TITLES: { [string]: string } = {
 	Waiting = "WAITING FOR PLAYERS",
@@ -47,29 +50,43 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = playerGui
 
-local function outlinedLabel(name: string, position: UDim2, size: UDim2, color: Color3): TextLabel
-	local label = Instance.new("TextLabel")
-	label.Name = name
-	label.AnchorPoint = Vector2.new(0.5, 0)
-	label.Position = position
-	label.Size = size
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.LuckiestGuy
-	label.TextScaled = true
-	label.TextColor3 = color
-	label.Text = ""
-	label.Parent = gui
-	local uiStroke = Instance.new("UIStroke")
-	uiStroke.Thickness = 3
-	uiStroke.Color = Color3.fromRGB(60, 20, 0)
-	uiStroke.Parent = label
-	return label
+-- A glass pill that sizes itself to its text.
+local function pill(name: string, y: number, textSize: number, color: Color3): (Frame, TextLabel)
+	local frame = UiTheme.panel(gui, name, UDim.new(0.5, 0))
+	frame.AnchorPoint = Vector2.new(0.5, 0)
+	frame.Position = UDim2.new(0.5, 0, 0, y)
+	frame.AutomaticSize = Enum.AutomaticSize.X
+	frame.Size = UDim2.fromOffset(0, textSize + 14)
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 16)
+	padding.PaddingRight = UDim.new(0, 16)
+	padding.Parent = frame
+	local label = UiTheme.text(frame, UiTheme.Font, color, textSize)
+	label.AutomaticSize = Enum.AutomaticSize.X
+	label.Size = UDim2.fromScale(0, 1)
+	return frame, label
 end
 
-local phaseLabel = outlinedLabel("Phase", UDim2.new(0.5, 0, 0, 52), UDim2.fromOffset(420, 36), Color3.new(1, 1, 1))
-local banner =
-	outlinedLabel("Banner", UDim2.fromScale(0.5, 0.2), UDim2.fromScale(0.6, 0.1), Color3.fromRGB(255, 170, 30))
-local feed = outlinedLabel("Feed", UDim2.new(0.5, 0, 0, 92), UDim2.fromOffset(420, 22), Color3.fromRGB(255, 120, 120))
+local phasePill, phaseLabel = pill("Phase", 50, 16, COLORS.Text)
+local feedPill, feed = pill("Feed", 90, 14, COLORS.Text)
+feedPill.Visible = false
+
+local banner = UiTheme.text(gui, UiTheme.FontHeavy, COLORS.Text)
+banner.Name = "Banner"
+banner.AnchorPoint = Vector2.new(0.5, 0)
+banner.Position = UDim2.fromScale(0.5, 0.2)
+banner.Size = UDim2.fromScale(0.6, 0.08)
+UiTheme.stroke(banner, 1.5, Color3.new(0, 0, 0), 0.5).ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+local bannerRule = Instance.new("Frame") -- a thin accent line under the banner
+bannerRule.Name = "Rule"
+bannerRule.AnchorPoint = Vector2.new(0.5, 0)
+bannerRule.Position = UDim2.new(0.5, 0, 1, 6)
+bannerRule.Size = UDim2.new(0.4, 0, 0, 3)
+bannerRule.BackgroundColor3 = COLORS.UltA
+bannerRule.BorderSizePixel = 0
+bannerRule.Visible = false
+bannerRule.Parent = banner
+UiTheme.corner(bannerRule, UDim.new(0, 2))
 
 -- Final Duel: FOV + music ------------------------------------------------------------------
 
@@ -127,6 +144,7 @@ local function onPhaseChanged()
 	end
 	if phase ~= "MatchEnd" then
 		banner.Text = ""
+		bannerRule.Visible = false
 	end
 end
 
@@ -140,6 +158,8 @@ RunService.RenderStepped:Connect(function()
 	local endsAt = state:GetAttribute(STATE.PhaseEndsAt)
 	local alive = state:GetAttribute(STATE.AliveCount)
 
+	phaseLabel.TextColor3 = if phase == "FinalDuel" then COLORS.UltA else COLORS.Text
+	phasePill.Visible = title ~= ""
 	if phase == "Active" and typeof(alive) == "number" then
 		phaseLabel.Text = `{title} {alive}`
 	elseif typeof(endsAt) == "number" and endsAt > 0 then
@@ -157,16 +177,23 @@ local function nameOf(userId: number?, fallback: string?): string
 	return if player then player.DisplayName else fallback or "Someone"
 end
 
+local feedToken = 0
+
+local function showBanner(text: string)
+	banner.Text = text
+	bannerRule.Visible = true
+	banner.Size = UDim2.fromScale(0.7, 0.1)
+	TweenService:Create(banner, TweenInfo.new(0.35, Enum.EasingStyle.Back), { Size = UDim2.fromScale(0.6, 0.08) })
+		:Play()
+end
+
 remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPayload)
 	if payload.kind == "Winner" then
-		banner.Text = `{string.upper(nameOf(payload.userId, payload.displayName))} WINS!`
-		banner.Size = UDim2.fromScale(0.75, 0.13)
-		TweenService:Create(banner, TweenInfo.new(0.35, Enum.EasingStyle.Back), { Size = UDim2.fromScale(0.6, 0.1) })
-			:Play()
+		showBanner(`{string.upper(nameOf(payload.userId, payload.displayName))} WINS`)
 	elseif payload.kind == "Draw" then
-		banner.Text = `TIME! {string.upper(payload.displayName or "")} WIN`
+		showBanner(`TIME · {string.upper(payload.displayName or "")} WIN`)
 	elseif payload.kind == "NoContest" then
-		banner.Text = "NO CONTEST"
+		showBanner("NO CONTEST")
 	elseif payload.kind == "Eliminated" then
 		local victim = nameOf(payload.userId, payload.displayName)
 		local killer = if payload.killerId then nameOf(payload.killerId, nil) else nil
@@ -174,14 +201,20 @@ remotes.RoundEvent.OnClientEvent:Connect(function(payload: Types.RoundEventPaylo
 			feed.Text = if killer then `{killer} knocked {victim} off the arena` else `{victim} fell off the arena`
 		elseif payload.cause == "Left" then
 			feed.Text = if killer then `{killer} knocked out {victim} (they left)` else `{victim} left the match`
+		elseif killer and payload.cause == "Kick" then
+			feed.Text = `{killer} exploded {victim}`
 		elseif killer then
-			feed.Text = `{killer} kicked out {victim}`
+			feed.Text = `{killer} knocked out {victim}`
 		else
 			feed.Text = `{victim} was knocked out`
 		end
-		feed.TextTransparency = 0
-		TweenService:Create(feed, TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.In, 0, false, 2), {
-			TextTransparency = 1,
-		}):Play()
+		feedPill.Visible = true
+		feedToken += 1
+		local token = feedToken
+		task.delay(3, function()
+			if token == feedToken then
+				feedPill.Visible = false
+			end
+		end)
 	end
 end)

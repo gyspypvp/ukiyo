@@ -7,9 +7,10 @@
 	  * Everyone can kick anyone at any moment (one kick in the air at a time,
 	    plus a short cooldown; CombatService enforces both), and everyone can
 	    Block at any moment.
-	  * Everyone has 100 HP; an un-parried kick deals damage that scales with
-	    its speed. Parry ping-pong compounds speed, so long exchanges get deadly.
-	  * 0 HP, falling off the arena, dying or leaving is an elimination.
+	  * Every kick that lands is a strike; the third strike explodes you. Parry
+	    ping-pong compounds speed and pulls the pair closer, so long exchanges
+	    become frantic close-range duels.
+	  * Exploding, falling off the arena, dying or leaving is an elimination.
 	  * Two left: Final Duel. One left: they win.
 
 	Everything here goes through the GameMode contract (ServerTypes); there is
@@ -49,15 +50,14 @@ local SurgeMode: ServerTypes.GameMode = {
 		ctx.eliminate(victim, attacker, cause)
 	end,
 
-	onDamaged = function(
+	onStruck = function(
 		_self: ServerTypes.GameMode,
 		_ctx: RoundContext,
 		_victim: Player,
 		_attacker: Player,
-		_damage: number,
-		_health: number
+		_strikes: number
 	)
-		-- Nothing extra: HP bookkeeping is CombatService's, coins are the RoundManager's.
+		-- Nothing extra: strike bookkeeping is CombatService's, coins are the RoundManager's.
 	end,
 
 	onParried = function(

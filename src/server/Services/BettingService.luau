@@ -4,15 +4,16 @@
 	=====================================
 	Eliminated players (and lobby spectators) bet Coins on who will win the
 	current round. Odds are locked when the bet is placed and priced by the
-	target's share of the arena's remaining HP (HP is public, so flat odds
-	would make backing the healthiest fighter free money):
+	target's share of the kicks the arena can still take before exploding
+	(strikes are public, so flat odds would make backing the untouched fighter
+	free money):
 
-	    multiplier = clamp(BetHouseEdge * totalAliveHP / targetHP,
+	    multiplier = clamp(BetHouseEdge * totalKicksLeft / targetKicksLeft,
 	                       MinBetMultiplier, aliveAtBet * BetHouseEdge)
 
-	With everyone at full HP that is aliveAtBet * BetHouseEdge: an early bet on a
-	crowded arena pays a lot. A healthy favourite pays less, and an underdog's
-	payout never exceeds the crowded-arena maximum.
+	With nobody struck yet that is aliveAtBet * BetHouseEdge: an early bet on a
+	crowded arena pays a lot. An untouched favourite pays less, and an
+	underdog's payout never exceeds the crowded-arena maximum.
 	Betting closes at the Final Duel (2 alive) so nobody can farm near-certain
 	outcomes. Coins are taken up front; a round with no single winner refunds.
 ]]
@@ -69,18 +70,20 @@ local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown
 		return false, "Not enough coins"
 	end
 
-	-- HP comes from the server-set attribute, so it can be trusted here.
-	local function healthOf(player: Player): number
-		local health = player:GetAttribute(Net.Attributes.Health)
-		return if typeof(health) == "number" then math.max(health, 1) else Config.Health.MaxHealth
+	-- Kicks a fighter can still take before exploding. The strike count is a
+	-- server-set attribute, so it can be trusted here.
+	local function kicksLeft(player: Player): number
+		local strikes = player:GetAttribute(Net.Attributes.Strikes)
+		local taken = if typeof(strikes) == "number" then strikes else 0
+		return math.max(Config.Strikes.ToExplode - taken, 1)
 	end
-	local totalHealth = 0
+	local totalLeft = 0
 	for _, player in alivePlayers do
-		totalHealth += healthOf(player)
+		totalLeft += kicksLeft(player)
 	end
 	local edge = Config.Rewards.BetHouseEdge
 	local multiplier = math.clamp(
-		edge * totalHealth / healthOf(target),
+		edge * totalLeft / kicksLeft(target),
 		Config.Rewards.MinBetMultiplier,
 		math.max(alive * edge, Config.Rewards.MinBetMultiplier)
 	)

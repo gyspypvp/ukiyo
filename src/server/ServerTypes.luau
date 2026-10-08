@@ -25,7 +25,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.Types)
 
--- Why a fighter went down (health hit 0, fell off, died, left). The GameMode
+-- Why a fighter went down (exploded by strikes, fell off, died, left). The GameMode
 -- decides what each cause means. Defined in Shared/Types so clients can show it.
 export type DefeatCause = Types.DefeatCause
 
@@ -63,15 +63,8 @@ export type GameMode = {
 	canLaunch: (self: GameMode, ctx: RoundContext, player: Player) -> boolean,
 	canTarget: (self: GameMode, ctx: RoundContext, attacker: Player, target: Player) -> boolean,
 	onDefeated: (self: GameMode, ctx: RoundContext, victim: Player, attacker: Player?, cause: DefeatCause) -> (),
-	-- A kick landed but the victim survived (health > 0 left).
-	onDamaged: (
-		self: GameMode,
-		ctx: RoundContext,
-		victim: Player,
-		attacker: Player,
-		damage: number,
-		health: number
-	) -> (),
+	-- A strike landed but didn't explode the victim (`strikes` = their total now).
+	onStruck: (self: GameMode, ctx: RoundContext, victim: Player, attacker: Player, strikes: number) -> (),
 	onParried: (self: GameMode, ctx: RoundContext, defender: Player, attacker: Player, perfect: boolean) -> (),
 
 	-- Win conditions --------------------------------------------------------

@@ -21,7 +21,7 @@ Config.Round = table.freeze({
 	SpawnPhaseTime = 4, -- seconds between the arena teleport and the fight starting
 	MatchEndTime = 6, -- seconds the "X WINS!" banner stays up
 	MaxPlayers = 15, -- extra players sit the round out in the lobby
-	MaxActiveTime = 540, -- failsafe: no round runs longer (HP rounds take ~2-3x the hits of one-hit KOs)
+	MaxActiveTime = 540, -- failsafe: no round runs longer (three strikes take ~3x the hits of one-hit KOs)
 	EliminationReturnDelay = 1.25, -- ragdoll beat before a KO'd player is sent to the lobby
 	ModeRotation = table.freeze({ "Surge" }), -- GameMode names the RoundManager cycles through
 })
@@ -41,11 +41,11 @@ Config.Kick = table.freeze({
 	Cooldown = 1.25, -- after your kick ends (hit, parried, clashed), wait this long before kicking again
 	ClashStun = 0.35, -- head-on clash: both kickers bounce apart and hang stunned this long
 	ClashGap = 24, -- head-on clash: studs between the two kickers after the bounce
-	MinKickDistance = 22, -- a kick started closer than this hops back first, so it can always be parried
+	MinKickDistance = 24, -- a kick started closer than this hops back first, so it can always be parried
 	ClosingFloor = 0.25, -- closing speed never drops below this fraction of flight speed
 	EtaBroadcastInterval = 1 / 20, -- KickUpdated cadence (seconds)...
 	EtaBroadcastDrift = 0.015, -- ...or sooner if the ETA moved by more than this
-	HitFlingSpeed = 70, -- cosmetic fling applied to the KO'd player
+	HitFlingSpeed = 70, -- cosmetic fling applied to an exploded player's body
 })
 
 -- The counter-dash (parry) ---------------------------------------------------
@@ -65,15 +65,47 @@ Config.Parry = table.freeze({
 	DistanceSlack = 3, -- extra studs tolerated by the parry distance check
 })
 
--- Health: damage scales with kick speed (CombatMath.hitDamage) -------------------
-Config.Health = table.freeze({
-	MaxHealth = 100, -- everyone starts each round full
-	BaseDamage = 25, -- damage of an opening kick (rally 0, base speed)
-	DamageExponent = 1.5, -- >1 makes long rallies disproportionately deadly (10-parry rally one-shots)
-	HitTumbleTime = 0.7, -- a non-lethal hit sends the victim tumbling; no launching until it ends
+-- Strikes: every kick that lands is one strike; enough strikes and you explode -------------
+Config.Strikes = table.freeze({
+	ToExplode = 3, -- land this many kicks on a player to explode them
+	HitTumbleTime = 0.7, -- a strike that isn't the last sends the victim tumbling; no kicking until it ends
 	HitFlingSpeed = 42, -- studs/s along the kick direction during the tumble
 	HitFlingLift = 26, -- studs/s upward during the tumble
 	LastHitCredit = 5, -- seconds: falling off the arena after a hit credits the last attacker
+	FinisherPushBack = 9, -- the finishing kicker carries through and lands this many studs past the blast, back to it
+})
+
+-- Duels: Blade Ball-style close-range kick exchanges ----------------------------------
+-- Every parry in a rally pulls the two fighters closer, until they are trading kicks
+-- at close range faster and faster, mashing Block to keep up, until someone cracks.
+Config.Duel = table.freeze({
+	GapShrink = 0.82, -- each parry in a rally multiplies the ricochet gap by this...
+	MinGap = 14, -- ...down to this many studs
+	SpamWindow = 1.0, -- for this long after any parry you're part of, a miss costs no lockout (mash away)
+})
+
+-- DASH: a quick dodge burst in your movement direction (server-driven) ---------------
+Config.Dash = table.freeze({
+	Distance = 18, -- studs covered by one dash
+	Time = 0.18, -- seconds the burst lasts
+	Cooldown = 2.0, -- seconds between dashes
+})
+
+-- ULTIMATE: a charged, unblockable leap-and-dive finisher kick ------------------------
+-- It can't be parried, but it doesn't home during the dive: DASH out of the marked
+-- zone before it lands.
+Config.Ultimate = table.freeze({
+	ChargePerHit = 0.30, -- meter gained (0..1) for every kick you land
+	ChargePerParry = 0.15, -- ...for every successful parry
+	ChargePerSecond = 1 / 90, -- ...and slowly over time while fighting
+	LeapTime = 0.6, -- the telegraphed leap + flip before the dive
+	LeapHeight = 24, -- studs above the start at the top of the leap
+	LeapForward = 0.35, -- fraction of the way to the target covered during the leap
+	DiveTime = 0.5, -- seconds from the impact marker locking to impact: the window to DASH out
+	Radius = 9, -- the target is hit within this many studs (flat) of the impact point; jumping doesn't help
+	Strikes = 2, -- strikes dealt by a landed ultimate
+	MaxRange = 140, -- longest legal ultimate target distance
+	MissRecovery = 1.0, -- a missed ultimate adds this to the usual kick cooldown (an opening for the dodger)
 })
 
 -- Latency / lag compensation ---------------------------------------------------
@@ -120,7 +152,7 @@ Config.Movement = table.freeze({
 -- Economy ---------------------------------------------------------------------
 Config.Rewards = table.freeze({
 	CoinsPerKill = 15,
-	CoinsPerHit = 5, -- a non-lethal hit
+	CoinsPerHit = 5, -- a strike that doesn't explode the victim
 	CoinsPerParry = 2,
 	CoinsPerPerfect = 3, -- on top of CoinsPerParry
 	MaxParryCoinsPerRound = 60, -- cap per player, so colluding friends can't farm parries forever
@@ -158,8 +190,10 @@ Config.Tags = table.freeze({
 -- Token buckets: `rate` requests/second sustained, `burst` requests at once.
 Config.RateLimits = table.freeze({
 	Launch = table.freeze({ rate = 4, burst = 4 }),
-	Parry = table.freeze({ rate = 6, burst = 6 }),
+	Parry = table.freeze({ rate = 20, burst = 20 }), -- high: duels are won by mashing Block
 	Ability = table.freeze({ rate = 2, burst = 3 }),
+	Dash = table.freeze({ rate = 3, burst = 3 }),
+	Ultimate = table.freeze({ rate = 2, burst = 2 }),
 	PingReply = table.freeze({ rate = 3, burst = 5 }),
 	Lobby = table.freeze({ rate = 4, burst = 8 }),
 })

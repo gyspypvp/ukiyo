@@ -2,21 +2,23 @@
 --[[
 	HitFeedback (ModuleScript, StarterPlayerScripts/Client)
 	=======================================================
-	Answers "who hit me, and why did it hurt that much?" the moment it happens.
+	Answers "who hit me, and how close am I to exploding?" the moment it happens.
 
-	  * HUD health bar for the local player (with a trailing "damage ghost"),
-	    plus overhead health bars on everyone else in the arena
-	  * Hit card: attacker avatar + name, damage taken and HP left, the reason
-	    ("6-parry rally at speed 133: faster rallies hit harder") and a parry tip
+	  * Strike pips: one per strike it takes to explode you (Config.Strikes),
+	    filling red as kicks land. Yours sit on the HUD; everyone else in the
+	    arena has a small row over their head.
+	  * Hit card: attacker avatar + name, which strike it was and how many you
+	    have left, the context ("6-parry rally at speed 133") and a tip
 	  * Red screen flash on every hit
 	  * Kill-cam: when you're eliminated, the camera follows whoever did it for
 	    a couple of seconds before handing back control
 
 	Layout rules: on normal screens the card sits below the phase label and
 	kill feed; on short (landscape phone) screens it moves to the very top so it
-	never covers the HP bar, and it never shrinks below 70% so its text stays
-	readable. It gets out of the way as soon as another kick targets you (the
-	parry ring must never be covered) and drops below the WINS banner at round end.
+	never covers the strike pips, and it never shrinks below 70% so its text
+	stays readable. It gets out of the way as soon as another kick targets you
+	(the parry ring must never be covered) and drops below the WINS banner at
+	round end.
 
 	Purely presentation: every number shown comes from the server's
 	KickResolved / RoundEvent payloads and server-set attributes.
@@ -31,90 +33,72 @@ local Workspace = game:GetService("Workspace")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Net = require(Shared:WaitForChild("Net"))
 local Types = require(Shared:WaitForChild("Types"))
+local UiTheme = require(script.Parent:WaitForChild("UiTheme"))
 
 local ATTR = Net.Attributes
+local COLORS = UiTheme.Colors
 local localPlayer = Players.LocalPlayer
 
 local CARD_TIME = 2.8 -- seconds the hit card stays up
 local KILL_CAM_TIME = 2.6 -- seconds the camera follows your eliminator
-local HIT_RED = Color3.fromRGB(255, 60, 60)
 local CARD_WIDTH, CARD_HEIGHT = 460, 150
 local SHORT_SCREEN = 600 -- below this height (landscape phones) the card moves to the top edge
 local CARD_TOP, CARD_TOP_SHORT = 124, 6 -- px from the top: below the phase label / at the very top
 local ROUND_END_TOP = 0.32 -- fraction of screen height: below the "X WINS!" banner
+local PIP_SIZE, PIP_GAP = 16, 8
+
+type Pips = {
+	frame: Frame, -- holds one circle per strike
+	pips: { Frame },
+	size: number,
+}
 
 type Widgets = {
 	cardHolder: Frame,
-	healthFrame: Frame,
-	healthFill: Frame,
-	healthGhost: Frame,
-	healthLabel: TextLabel,
+	strikes: Frame,
+	strikePips: Pips,
+	strikeLabel: TextLabel,
 	card: Frame,
 	cardPop: UIScale,
 	cardAvatar: ImageLabel,
 	cardTitle: TextLabel,
-	cardDamage: TextLabel,
+	cardStrikes: TextLabel,
 	cardReason: TextLabel,
 	cardTip: TextLabel,
 	flash: Frame,
 }
 
-type OverheadBar = {
+type Overhead = {
 	gui: BillboardGui,
-	fill: Frame,
+	pips: Pips,
 }
 
 local HitFeedback = {}
 
 local widgets: Widgets? = nil
-local overheadBars: { [Player]: OverheadBar } = {}
+local overheads: { [Player]: Overhead } = {}
 local guiRoot: PlayerGui? = nil
 local cardToken = 0 -- newer cards cancel the fade-out of older ones
 local cardTop = CARD_TOP -- updated with the screen size
 
 -- Helpers ---------------------------------------------------------------------------
 
--- `textSize` given: fixed, wrapped text that stays readable. Omitted: scales to fit its box.
-local function label(
+-- A left/top-aligned card label: fixed text size, wrapped.
+local function cardLabel(
 	parent: Instance,
 	font: Enum.Font,
 	color: Color3,
 	position: UDim2,
 	size: UDim2,
-	textSize: number?
-): TextLabel
-	local text = Instance.new("TextLabel")
-	text.BackgroundTransparency = 1
-	text.Font = font
-	text.TextColor3 = color
+	textSize: number
+)
+	local text = UiTheme.text(parent, font, color, textSize)
 	text.TextXAlignment = Enum.TextXAlignment.Left
 	text.TextYAlignment = Enum.TextYAlignment.Top
+	text.TextWrapped = true
 	text.Position = position
 	text.Size = size
-	text.Text = ""
-	if textSize then
-		text.TextScaled = false
-		text.TextSize = textSize
-		text.TextWrapped = true
-	else
-		text.TextScaled = true
-	end
-	text.Parent = parent
 	return text
-end
-
-local function corner(parent: GuiObject, radius: UDim)
-	local uiCorner = Instance.new("UICorner")
-	uiCorner.CornerRadius = radius
-	uiCorner.Parent = parent
-end
-
--- Green -> yellow -> red as health drops.
-local function healthColor(fraction: number): Color3
-	if fraction > 0.5 then
-		return Color3.fromRGB(255, 220, 60):Lerp(Color3.fromRGB(80, 220, 100), (fraction - 0.5) * 2)
-	end
-	return HIT_RED:Lerp(Color3.fromRGB(255, 220, 60), fraction * 2)
 end
 
 -- The Block input for whatever the player is actually using right now.
@@ -128,6 +112,16 @@ local function blockHint(): string
 	return "press F"
 end
 
+local function dashHint(): string
+	local lastInput = UserInputService:GetLastInputType()
+	if lastInput == Enum.UserInputType.Touch then
+		return "tap DASH"
+	elseif string.match(lastInput.Name, "^Gamepad") then
+		return "press B"
+	end
+	return "press Q"
+end
+
 local function parryTip(): string
 	return `Tip: {blockHint()} right before the kick lands to parry it`
 end
@@ -137,113 +131,152 @@ local function playerName(userId: number?): string
 	return if player then player.DisplayName else "someone"
 end
 
--- The "why": what made this kick hurt as much as it did.
+local function strikeCounts(player: Player): (number?, number?)
+	local taken = player:GetAttribute(ATTR.Strikes)
+	local limit = player:GetAttribute(ATTR.StrikesToExplode)
+	if typeof(taken) ~= "number" or typeof(limit) ~= "number" or limit <= 0 then
+		return nil, nil
+	end
+	return taken, limit
+end
+
+-- Context for the card: what kind of kick it was.
 local function describeKick(payload: Types.KickResolvedPayload): string
 	local speed = math.floor(payload.speed + 0.5)
-	if payload.perfect then
-		return `A Perfect counter-dash at speed {speed}: perfect parries hit harder`
+	if payload.ultimate then
+		return "Their charged ULTIMATE: it can't be blocked and counts as two strikes"
+	elseif payload.perfect then
+		return `A Perfect counter-dash at speed {speed}`
 	elseif payload.rally <= 0 then
 		return `Opening kick at speed {speed}`
 	end
-	return `{payload.rally}-parry rally at speed {speed}: faster rallies hit harder`
+	return `{payload.rally}-parry rally at speed {speed}`
 end
 
--- Health bar ---------------------------------------------------------------------------
+-- Strike pips ----------------------------------------------------------------------------
 
-local function refreshHealth()
+-- A row of `count` circles inside `parent` (rebuilt only when the count changes).
+local function buildPips(parent: Instance, size: number, gap: number): Pips
+	local frame = Instance.new("Frame")
+	frame.Name = "Pips"
+	frame.BackgroundTransparency = 1
+	frame.AutomaticSize = Enum.AutomaticSize.XY
+	frame.Parent = parent
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Padding = UDim.new(0, gap)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = frame
+	return { frame = frame, pips = {}, size = size }
+end
+
+-- Fill the first `taken` of `limit` pips; the newest filled pip pops if `animate`.
+local function setPips(pips: Pips, taken: number, limit: number, animate: boolean)
+	while #pips.pips < limit do
+		local pip = Instance.new("Frame")
+		pip.Name = `Pip{#pips.pips + 1}`
+		pip.LayoutOrder = #pips.pips + 1
+		pip.Size = UDim2.fromOffset(pips.size, pips.size)
+		pip.BackgroundColor3 = COLORS.Panel
+		pip.BackgroundTransparency = 0.35 -- empty
+		pip.BorderSizePixel = 0
+		pip.Parent = pips.frame
+		UiTheme.corner(pip, UDim.new(0.5, 0))
+		UiTheme.stroke(pip, 1.5, COLORS.Text, 0.2)
+		local pop = Instance.new("UIScale")
+		pop.Parent = pip
+		table.insert(pips.pips, pip)
+	end
+	while #pips.pips > limit do
+		local pip = table.remove(pips.pips)
+		if pip then
+			pip:Destroy()
+		end
+	end
+	for index, pip in pips.pips do
+		local filled = index <= taken
+		local wasFilled = pip.BackgroundTransparency < 0.5
+		pip.BackgroundColor3 = if filled then COLORS.Danger else COLORS.Panel
+		pip.BackgroundTransparency = if filled then 0 else 0.35
+		local pop = pip:FindFirstChildOfClass("UIScale")
+		if animate and filled and not wasFilled and pop then
+			pop.Scale = 1.8
+			TweenService:Create(pop, TweenInfo.new(0.3, Enum.EasingStyle.Back), { Scale = 1 }):Play()
+		end
+	end
+end
+
+local function refreshStrikes()
 	local ui = widgets
 	if ui == nil then
 		return
 	end
-	local health = localPlayer:GetAttribute(ATTR.Health)
-	local maxHealth = localPlayer:GetAttribute(ATTR.MaxHealth)
-	if typeof(health) ~= "number" or typeof(maxHealth) ~= "number" or maxHealth <= 0 then
-		ui.healthFrame.Visible = false
+	local taken, limit = strikeCounts(localPlayer)
+	if taken == nil or limit == nil then
+		ui.strikes.Visible = false
 		return
 	end
-
-	local wasHidden = not ui.healthFrame.Visible
-	ui.healthFrame.Visible = true
-	local fraction = math.clamp(health / maxHealth, 0, 1)
-	ui.healthLabel.Text = `{math.floor(health)} / {math.floor(maxHealth)}`
-	ui.healthFill.BackgroundColor3 = healthColor(fraction)
-
-	if wasHidden then
-		-- Fresh round: snap to full, no animation.
-		ui.healthFill.Size = UDim2.fromScale(fraction, 1)
-		ui.healthGhost.Size = UDim2.fromScale(fraction, 1)
-		return
-	end
-	-- The fill drops at once; the white ghost drains after it, so you can SEE the chunk you lost.
-	TweenService:Create(ui.healthFill, TweenInfo.new(0.12), { Size = UDim2.fromScale(fraction, 1) }):Play()
-	TweenService:Create(
-		ui.healthGhost,
-		TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 0.45),
-		{ Size = UDim2.fromScale(fraction, 1) }
-	):Play()
+	local wasHidden = not ui.strikes.Visible
+	ui.strikes.Visible = true
+	setPips(ui.strikePips, taken, limit, not wasHidden) -- fresh round: no pop
+	local left = math.max(limit - taken, 0)
+	ui.strikeLabel.Text = if left == 1 then "LAST KICK" else `{left} KICKS LEFT`
+	ui.strikeLabel.TextColor3 = if left == 1 then COLORS.Danger else COLORS.SubText
 end
 
 --[[
-	Overhead bars on other players (yours is the HUD bar).
-	Hidden while that player is FLYING: a bar would give away an Invis-Dash
-	kicker and mark which Shadow Clone lane is real. Not AlwaysOnTop, so bars
+	Pips over other players (yours are on the HUD).
+	Hidden while that player is FLYING: they would give away an Invis-Dash
+	kicker and mark which Shadow Clone lane is real. Not AlwaysOnTop, so they
 	never reveal anyone through walls.
 ]]
 local function refreshOverhead(player: Player)
 	if player == localPlayer then
 		return
 	end
-	local health = player:GetAttribute(ATTR.Health)
-	local maxHealth = player:GetAttribute(ATTR.MaxHealth)
+	local taken, limit = strikeCounts(player)
 	local character = player.Character
 	local anchor = if character
 		then character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
 		else nil
-	local bar = overheadBars[player]
+	local overhead = overheads[player]
 
-	if typeof(health) ~= "number" or typeof(maxHealth) ~= "number" or maxHealth <= 0 or anchor == nil then
-		if bar then
-			bar.gui:Destroy()
-			overheadBars[player] = nil
+	if taken == nil or limit == nil or anchor == nil then
+		if overhead then
+			overhead.gui:Destroy()
+			overheads[player] = nil
 		end
 		return
 	end
 
-	if bar == nil then
+	if overhead == nil then
 		local gui = Instance.new("BillboardGui")
-		gui.Name = `Health_{player.UserId}`
-		gui.Size = UDim2.fromOffset(76, 9)
-		gui.StudsOffset = Vector3.new(0, 2.2, 0)
+		gui.Name = `Strikes_{player.UserId}`
+		gui.Size = UDim2.fromOffset(80, 14)
+		gui.StudsOffset = Vector3.new(0, 2.3, 0)
 		gui.AlwaysOnTop = false
 		gui.MaxDistance = 140
 		gui.LightInfluence = 0
 		gui.ResetOnSpawn = false
 		gui.Parent = guiRoot
-		local back = Instance.new("Frame")
-		back.Size = UDim2.fromScale(1, 1)
-		back.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-		back.BackgroundTransparency = 0.25
-		back.Parent = gui
-		corner(back, UDim.new(0.5, 0))
-		local fill = Instance.new("Frame")
-		fill.Size = UDim2.fromScale(1, 1)
-		fill.Parent = back
-		corner(fill, UDim.new(0.5, 0))
-		local created: OverheadBar = { gui = gui, fill = fill }
-		overheadBars[player] = created
-		bar = created
+		local pips = buildPips(gui, 10, 5)
+		pips.frame.AnchorPoint = Vector2.new(0.5, 0.5)
+		pips.frame.Position = UDim2.fromScale(0.5, 0.5)
+		local created: Overhead = { gui = gui, pips = pips }
+		overheads[player] = created
+		overhead = created
 	end
 
-	local current = bar :: OverheadBar
-	local fraction = math.clamp(health / maxHealth, 0, 1)
+	local current = overhead :: Overhead
 	current.gui.Adornee = anchor
 	current.gui.Enabled = player:GetAttribute(ATTR.Flying) ~= true
-	current.fill.BackgroundColor3 = healthColor(fraction)
-	TweenService:Create(current.fill, TweenInfo.new(0.15), { Size = UDim2.fromScale(fraction, 1) }):Play()
+	setPips(current.pips, taken, limit, true)
 end
 
 local function watchOverhead(player: Player)
-	for _, attribute in { ATTR.Health, ATTR.MaxHealth, ATTR.Flying } do
+	for _, attribute in { ATTR.Strikes, ATTR.StrikesToExplode, ATTR.Flying } do
 		player:GetAttributeChangedSignal(attribute):Connect(function()
 			refreshOverhead(player)
 		end)
@@ -261,11 +294,11 @@ local function flash()
 	if ui == nil then
 		return
 	end
-	ui.flash.BackgroundTransparency = 0.55
+	ui.flash.BackgroundTransparency = 0.6
 	TweenService:Create(ui.flash, TweenInfo.new(0.45), { BackgroundTransparency = 1 }):Play()
 end
 
-local function showCard(attackerId: number?, title: string, damage: string, reason: string, tip: string)
+local function showCard(attackerId: number?, title: string, strikes: string, reason: string, tip: string)
 	local ui = widgets
 	if ui == nil then
 		return
@@ -276,14 +309,14 @@ local function showCard(attackerId: number?, title: string, damage: string, reas
 	ui.cardAvatar.Image = if attackerId then `rbxthumb://type=AvatarHeadShot&id={attackerId}&w=150&h=150` else ""
 	ui.cardAvatar.Visible = attackerId ~= nil
 	ui.cardTitle.Text = title
-	ui.cardDamage.Text = damage
-	ui.cardDamage.Visible = damage ~= ""
+	ui.cardStrikes.Text = strikes
+	ui.cardStrikes.Visible = strikes ~= ""
 	ui.cardReason.Text = reason
 	ui.cardTip.Text = tip
 
 	ui.cardHolder.Position = UDim2.new(0.5, 0, 0, cardTop)
 	ui.card.Visible = true
-	ui.cardPop.Scale = 1.2
+	ui.cardPop.Scale = 1.12
 	TweenService:Create(ui.cardPop, TweenInfo.new(0.2, Enum.EasingStyle.Back), { Scale = 1 }):Play()
 
 	task.delay(CARD_TIME, function()
@@ -316,12 +349,12 @@ end
 
 -- Public API -----------------------------------------------------------------------------
 
--- Hide the card now (another kick is coming at you, or the round ended).
 -- Does the card overlap the parry ring? (Only on short screens, where it sits at the top edge.)
 function HitFeedback.coversRing(): boolean
 	return cardTop == CARD_TOP_SHORT
 end
 
+-- Hide the card now (another kick is coming at you, or the round ended).
 function HitFeedback.hideCard()
 	cardToken += 1
 	local ui = widgets
@@ -329,8 +362,6 @@ function HitFeedback.hideCard()
 		ui.card.Visible = false
 	end
 end
-
-HitFeedback.blockHint = blockHint
 
 --[[
 	A kick resolved somewhere. Only hits on the local player produce feedback here.
@@ -342,25 +373,29 @@ function HitFeedback.onKickResolved(payload: Types.KickResolvedPayload, othersIn
 		return
 	end
 	local attacker = string.upper(playerName(payload.attackerId))
+	local _, limit = strikeCounts(localPlayer)
+	local total = limit or payload.strikes
+	local tip = if payload.ultimate then `Tip: {dashHint()} out of the marked zone to dodge an ULTIMATE` else parryTip()
 	flash()
-	if payload.lethal then
+	if payload.exploded then
 		showCard(
 			payload.attackerId,
-			`ELIMINATED BY {attacker}`,
-			`-{payload.damage} HP`,
+			`EXPLODED BY {attacker}`,
+			`STRIKE {payload.strikes} OF {total}`,
 			describeKick(payload),
-			parryTip()
+			tip
 		)
 		killCam(payload.attackerId)
 	elseif othersIncoming and HitFeedback.coversRing() then
-		return -- the flash and the HUD health bar still show the hit
+		return -- the flash and the HUD strike pips still show the hit
 	else
+		local left = math.max(total - payload.strikes, 0)
 		showCard(
 			payload.attackerId,
-			`KICKED BY {attacker}`,
-			`-{payload.damage} HP · {payload.health} left`,
+			if payload.ultimate then `ULTIMATE BY {attacker}` else `KICKED BY {attacker}`,
+			`STRIKE {payload.strikes} OF {total} · {if left == 1 then "1 MORE EXPLODES YOU" else `{left} LEFT`}`,
 			describeKick(payload),
-			parryTip()
+			tip
 		)
 	end
 end
@@ -384,8 +419,8 @@ function HitFeedback.onRoundEvent(payload: Types.RoundEventPayload)
 			payload.killerId,
 			`KNOCKED OFF BY {string.upper(playerName(payload.killerId))}`,
 			"",
-			"They knocked you off the edge of the arena",
-			"Tip: stay away from the edges when you're low on HP"
+			"Their kick sent you over the edge of the arena",
+			"Tip: keep away from the edges once you've taken a strike"
 		)
 		killCam(payload.killerId)
 	else
@@ -406,53 +441,29 @@ function HitFeedback.init(playerGui: PlayerGui)
 	local flashFrame = Instance.new("Frame")
 	flashFrame.Name = "Flash"
 	flashFrame.Size = UDim2.fromScale(1, 1)
-	flashFrame.BackgroundColor3 = HIT_RED
+	flashFrame.BackgroundColor3 = COLORS.Danger
 	flashFrame.BackgroundTransparency = 1
-	flashFrame.Active = false
 	flashFrame.Parent = gui
 
-	-- Health bar, just above the BLOCK / ABILITY buttons.
-	local healthFrame = Instance.new("Frame")
-	healthFrame.Name = "Health"
-	healthFrame.AnchorPoint = Vector2.new(0.5, 1)
-	healthFrame.Position = UDim2.new(0.5, 0, 1, -162)
-	healthFrame.Size = UDim2.fromOffset(260, 20)
-	healthFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-	healthFrame.BackgroundTransparency = 0.2
-	healthFrame.Visible = false
-	healthFrame.Parent = gui
-	corner(healthFrame, UDim.new(0, 6))
-	local healthStroke = Instance.new("UIStroke")
-	healthStroke.Thickness = 2
-	healthStroke.Color = Color3.new(1, 1, 1)
-	healthStroke.Parent = healthFrame
+	-- Strike pips: above the action row on keyboard/gamepad, bottom-centre on touch
+	-- (the touch buttons sit bottom-right, the thumbstick bottom-left).
+	local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local strikes = UiTheme.panel(gui, "Strikes", UDim.new(0.5, 0))
+	strikes.AnchorPoint = Vector2.new(0.5, 1)
+	strikes.Position = if touchOnly then UDim2.new(0.5, 0, 1, -14) else UDim2.new(0.5, 0, 1, -128)
+	strikes.Size = UDim2.fromOffset(196, 28)
+	strikes.Visible = false
+	local strikePips = buildPips(strikes, PIP_SIZE, PIP_GAP)
+	strikePips.frame.AnchorPoint = Vector2.new(0, 0.5)
+	strikePips.frame.Position = UDim2.new(0, 12, 0.5, 0)
+	local strikeLabel = UiTheme.text(strikes, UiTheme.Font, COLORS.SubText, 12)
+	strikeLabel.AnchorPoint = Vector2.new(1, 0.5)
+	strikeLabel.Position = UDim2.new(1, -12, 0.5, 0)
+	strikeLabel.Size = UDim2.fromOffset(96, 16)
+	strikeLabel.TextXAlignment = Enum.TextXAlignment.Right
 
-	local healthGhost = Instance.new("Frame")
-	healthGhost.Name = "Ghost"
-	healthGhost.Size = UDim2.fromScale(1, 1)
-	healthGhost.BackgroundColor3 = Color3.new(1, 1, 1)
-	healthGhost.BackgroundTransparency = 0.25
-	healthGhost.Parent = healthFrame
-	corner(healthGhost, UDim.new(0, 6))
-
-	local healthFill = Instance.new("Frame")
-	healthFill.Name = "Fill"
-	healthFill.Size = UDim2.fromScale(1, 1)
-	healthFill.BackgroundColor3 = healthColor(1)
-	healthFill.Parent = healthFrame
-	corner(healthFill, UDim.new(0, 6))
-
-	local healthLabel =
-		label(healthFrame, Enum.Font.GothamBlack, Color3.new(1, 1, 1), UDim2.fromScale(0, 0), UDim2.fromScale(1, 1))
-	healthLabel.TextXAlignment = Enum.TextXAlignment.Center
-	healthLabel.TextYAlignment = Enum.TextYAlignment.Center
-	healthLabel.ZIndex = 3
-	local labelStroke = Instance.new("UIStroke")
-	labelStroke.Thickness = 1.5
-	labelStroke.Parent = healthLabel
-
-	-- Hit card: who, how much, why. A holder carries the screen-size scale so the
-	-- card's own pop-in tween can animate its scale independently.
+	-- Hit card: who, which strike, why. A holder carries the screen-size scale so
+	-- the card's own pop-in tween can animate its scale independently.
 	local holder = Instance.new("Frame")
 	holder.Name = "HitCardHolder"
 	holder.AnchorPoint = Vector2.new(0.5, 0)
@@ -472,8 +483,8 @@ function HitFeedback.init(playerGui: PlayerGui)
 			if holder.Position.Y.Scale == 0 then
 				holder.Position = UDim2.new(0.5, 0, 0, cardTop)
 			end
-			-- Shrink to fit short or narrow screens, but never below 70% (16 px text -> 11 px).
-			-- At 360 px tall the card spans 6-126 px, well clear of the HP bar (H-182 to H-162).
+			-- Shrink to fit short or narrow screens, but never below 70% (15 px text -> 10.5 px).
+			-- At 360 px tall the card spans 6-111 px, far from the touch strike pips (H-42 to H-14).
 			fitScale.Scale = math.clamp(math.min(viewport.Y / 450, viewport.X * 0.92 / CARD_WIDTH), 0.7, 1)
 		end
 	end
@@ -487,91 +498,92 @@ function HitFeedback.init(playerGui: PlayerGui)
 	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchCamera)
 	watchCamera()
 
-	local card = Instance.new("Frame")
-	card.Name = "HitCard"
+	local card = UiTheme.panel(holder, "HitCard", UDim.new(0, 14))
 	card.AnchorPoint = Vector2.new(0.5, 0.5) -- the pop-in scales around the card's centre
 	card.Position = UDim2.fromScale(0.5, 0.5)
 	card.Size = UDim2.fromScale(1, 1)
-	card.BackgroundColor3 = Color3.fromRGB(25, 10, 12)
-	card.BackgroundTransparency = 0.15
+	card.BackgroundTransparency = 0.12
 	card.Visible = false
-	card.Parent = holder
-	corner(card, UDim.new(0, 12))
-	local cardStroke = Instance.new("UIStroke")
-	cardStroke.Thickness = 3
-	cardStroke.Color = HIT_RED
-	cardStroke.Parent = card
+	local accent = Instance.new("Frame") -- a slim red bar down the left edge
+	accent.Name = "Accent"
+	accent.Position = UDim2.fromOffset(0, 14)
+	accent.Size = UDim2.new(0, 4, 1, -28)
+	accent.BackgroundColor3 = COLORS.Danger
+	accent.BorderSizePixel = 0
+	accent.Parent = card
+	UiTheme.corner(accent, UDim.new(0, 2))
 	local cardPop = Instance.new("UIScale")
 	cardPop.Parent = card
 
 	local cardAvatar = Instance.new("ImageLabel")
 	cardAvatar.Name = "Attacker"
-	cardAvatar.Position = UDim2.fromOffset(12, 14)
-	cardAvatar.Size = UDim2.fromOffset(96, 96)
-	cardAvatar.BackgroundColor3 = Color3.fromRGB(60, 20, 25)
+	cardAvatar.Position = UDim2.fromOffset(18, 16)
+	cardAvatar.Size = UDim2.fromOffset(88, 88)
+	cardAvatar.BackgroundColor3 = Color3.fromRGB(40, 44, 56)
 	cardAvatar.Parent = card
-	corner(cardAvatar, UDim.new(0.5, 0))
+	UiTheme.corner(cardAvatar, UDim.new(0.5, 0))
+	UiTheme.stroke(cardAvatar, 2, COLORS.Danger)
 
-	local textLeft, textWidth = 120, CARD_WIDTH - 132
-	local cardTitle = label(
+	local textLeft, textWidth = 122, CARD_WIDTH - 136
+	local cardTitle = cardLabel(
 		card,
-		Enum.Font.LuckiestGuy,
-		Color3.new(1, 1, 1),
-		UDim2.fromOffset(textLeft, 10),
-		UDim2.fromOffset(textWidth, 30),
-		26
+		UiTheme.FontHeavy,
+		COLORS.Text,
+		UDim2.fromOffset(textLeft, 14),
+		UDim2.fromOffset(textWidth, 26),
+		22
 	)
 	cardTitle.TextWrapped = false
 	cardTitle.TextTruncate = Enum.TextTruncate.AtEnd -- long display names: "KICKED BY SUPERLONGNA..."
-	local cardDamage =
-		label(card, Enum.Font.LuckiestGuy, HIT_RED, UDim2.fromOffset(textLeft, 42), UDim2.fromOffset(textWidth, 28), 24)
-	cardDamage.TextWrapped = false
-	local cardReason = label(
+	local cardStrikes = cardLabel(
 		card,
-		Enum.Font.GothamBold,
-		Color3.fromRGB(255, 210, 200),
-		UDim2.fromOffset(textLeft, 74),
-		UDim2.fromOffset(textWidth, 40),
-		16
+		UiTheme.FontHeavy,
+		COLORS.Danger,
+		UDim2.fromOffset(textLeft, 44),
+		UDim2.fromOffset(textWidth, 22),
+		17
 	)
-	local cardTip = label(
+	cardStrikes.TextWrapped = false
+	cardStrikes.TextTruncate = Enum.TextTruncate.AtEnd
+	local cardReason =
+		cardLabel(card, UiTheme.Font, COLORS.Text, UDim2.fromOffset(textLeft, 72), UDim2.fromOffset(textWidth, 38), 15)
+	local cardTip = cardLabel(
 		card,
-		Enum.Font.GothamMedium,
-		Color3.fromRGB(200, 200, 210),
-		UDim2.fromOffset(12, 118),
-		UDim2.fromOffset(CARD_WIDTH - 24, 22),
-		15
+		UiTheme.FontBody,
+		COLORS.SubText,
+		UDim2.fromOffset(18, 118),
+		UDim2.fromOffset(CARD_WIDTH - 36, 20),
+		14
 	)
 
 	widgets = {
 		cardHolder = holder,
-		healthFrame = healthFrame,
-		healthFill = healthFill,
-		healthGhost = healthGhost,
-		healthLabel = healthLabel,
+		strikes = strikes,
+		strikePips = strikePips,
+		strikeLabel = strikeLabel,
 		card = card,
 		cardPop = cardPop,
 		cardAvatar = cardAvatar,
 		cardTitle = cardTitle,
-		cardDamage = cardDamage,
+		cardStrikes = cardStrikes,
 		cardReason = cardReason,
 		cardTip = cardTip,
 		flash = flashFrame,
 	}
 
-	localPlayer:GetAttributeChangedSignal(ATTR.Health):Connect(refreshHealth)
-	localPlayer:GetAttributeChangedSignal(ATTR.MaxHealth):Connect(refreshHealth)
-	refreshHealth()
+	localPlayer:GetAttributeChangedSignal(ATTR.Strikes):Connect(refreshStrikes)
+	localPlayer:GetAttributeChangedSignal(ATTR.StrikesToExplode):Connect(refreshStrikes)
+	refreshStrikes()
 
 	Players.PlayerAdded:Connect(watchOverhead)
 	for _, player in Players:GetPlayers() do
 		watchOverhead(player)
 	end
 	Players.PlayerRemoving:Connect(function(player: Player)
-		local bar = overheadBars[player]
-		if bar then
-			bar.gui:Destroy()
-			overheadBars[player] = nil
+		local overhead = overheads[player]
+		if overhead then
+			overhead.gui:Destroy()
+			overheads[player] = nil
 		end
 	end)
 end

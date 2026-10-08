@@ -13,6 +13,11 @@
 	  * speed compounding across the rally
 	  * stun, ricochet gap and counter-dash (ricochet / redirect)
 	  * head-on clashes (two players kicking each other bounce apart)
+	  * duels: each parry in a rally pulls the two closer, and mashing Block is
+	    free inside a duel (Blade Ball-style close-range exchanges)
+	  * strikes: every landed kick is one; Config.Strikes.ToExplode explodes you
+	  * DASH (server-driven dodge burst) and ULTIMATE (charged, unblockable
+	    leap-and-dive kick that doesn't home during the dive)
 	  * basic physics-exploit checks (speed/teleport rubber-banding, void KO)
 
 	It knows nothing about rounds, lobbies or win conditions. Those come from a
@@ -29,9 +34,9 @@
 	              +---------------- "Clash" hold (latency-bounded) ---+
 	              |                                                   |
 	   RequestParry (valid) -> resolveParry                 no parry -> resolveHit
-	     attacker blasted back + stunned mid-air              damage = f(kick speed)
-	     defender startFlight(rally + 1) ---> (loops)         0 HP  -> Defeated("Kick")
-	                                                          else  -> tumble + Damaged
+	     attacker blasted back (duel-tightened gap)           +1 strike
+	     defender startFlight(rally + 1) ---> (loops)         3rd strike -> explode (Defeated "Kick")
+	                                                          else       -> tumble + Struck
 ]]
 
 local Players = game:GetService("Players")
@@ -59,7 +64,10 @@ local PlayerDataService = require(script.Parent.PlayerDataService)
 local ATTR = Net.Attributes
 local KICK = Config.Kick
 local PARRY = Config.Parry
-local HEALTH = Config.Health
+local STRIKES = Config.Strikes
+local DUEL = Config.Duel
+local DASH = Config.Dash
+local ULT = Config.Ultimate
 
 -- Gap history kept per flight for the parry distance check. At 60 Hz this is
 -- ~1.5 s, far more than the largest lag compensation we ever allow.
@@ -97,10 +105,17 @@ type Fighter = {
 	connections: { RBXScriptConnection },
 	defeated: boolean,
 
-	-- Health (damage scales with kick speed)
-	health: number,
+	-- Strikes (every landed kick is one; ToExplode and you explode)
+	strikes: number,
 	lastHitBy: Player?, -- credited if a hit knocks them off the arena
 	lastHitAt: number,
+
+	-- Duel / DASH / ULTIMATE
+	duelUntil: number, -- inside a duel until this time: a missed Block costs no lockout
+	dashReadyAt: number,
+	ultCharge: number, -- 0..1, ULTIMATE ready at 1
+	ultPublished: number, -- last ultCharge written to the attribute (throttles replication)
+	ultimate: UltimateState?, -- the ULTIMATE this fighter is performing
 
 	-- Kicks
 	flight: Flight?, -- the kick this fighter is performing (at most one)
@@ -151,17 +166,33 @@ type Flight = {
 	abilityUsed: boolean,
 }
 
+type UltimateStage = "Leap" | "Dive"
+
+type UltimateState = {
+	id: number,
+	attacker: Fighter,
+	target: Fighter,
+	stage: UltimateStage,
+	diveAt: number,
+	apex: Vector3,
+	direction: Vector3,
+	impactPoint: Vector3, -- locked at the top of the leap; the dive flies straight at it
+	impactAt: number,
+	speed: number, -- dive speed (studs/s), for the hit card
+	held: boolean, -- paused because a kick has made contact with the performer
+}
+
 local CombatService = {}
 
 -- Signals (deferred; see Signal.luau) -------------------------------------------------
 local defeated: Signal.Signal<Player, Player?, DefeatCause> = Signal.new()
-local damaged: Signal.Signal<Player, Player, number, number> = Signal.new()
+local struck: Signal.Signal<Player, Player, number> = Signal.new()
 local parried: Signal.Signal<Player, Player, boolean, number> = Signal.new()
 local launched: Signal.Signal<Player, Player, number, number> = Signal.new()
 local flagged: Signal.Signal<Player, string> = Signal.new()
 
-CombatService.Defeated = defeated -- (victim, attacker?, cause): health hit 0 / fell / died / left
-CombatService.Damaged = damaged -- (victim, attacker, damage, healthLeft): a kick landed, victim survived
+CombatService.Defeated = defeated -- (victim, attacker?, cause): exploded / fell / died / left
+CombatService.Struck = struck -- (victim, attacker, strikes): a kick landed, victim survived it
 CombatService.Parried = parried -- (defender, attacker, perfect, rallyCount)
 CombatService.Launched = launched -- (attacker, target, rallyCount, speed)
 CombatService.Flagged = flagged -- (player, reason): integrity heuristics tripped
@@ -178,6 +209,7 @@ local DEFAULT_RULES: ServerTypes.CombatRules = {
 
 local fighters: { [Player]: Fighter } = {}
 local flights: { [number]: Flight } = {}
+local ultimates: { [number]: UltimateState } = {}
 local integrityByPlayer: { [Player]: Integrity } = {}
 local rules: ServerTypes.CombatRules = DEFAULT_RULES
 local remotes: Net.Remotes? = nil
@@ -187,6 +219,8 @@ local lastMovementCheck = 0
 local launchLimiter = RateLimiter.new(Config.RateLimits.Launch.rate, Config.RateLimits.Launch.burst)
 local parryLimiter = RateLimiter.new(Config.RateLimits.Parry.rate, Config.RateLimits.Parry.burst)
 local abilityLimiter = RateLimiter.new(Config.RateLimits.Ability.rate, Config.RateLimits.Ability.burst)
+local dashLimiter = RateLimiter.new(Config.RateLimits.Dash.rate, Config.RateLimits.Dash.burst)
+local ultimateLimiter = RateLimiter.new(Config.RateLimits.Ultimate.rate, Config.RateLimits.Ultimate.burst)
 
 -- Small helpers ----------------------------------------------------------------------
 
@@ -261,6 +295,18 @@ local function trustedVelocity(fighter: Fighter): Vector3
 	return horizontal + Vector3.new(0, math.clamp(velocity.Y, -verticalCap, verticalCap), 0)
 end
 
+-- Raycast params that see the map but not any fighter.
+local function excludeFighters(): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude: { Instance } = {}
+	for _, fighter in fighters do
+		table.insert(exclude, fighter.character)
+	end
+	params.FilterDescendantsInstances = exclude
+	return params
+end
+
 local function integrityFor(player: Player): Integrity
 	local integrity = integrityByPlayer[player]
 	if integrity == nil then
@@ -292,8 +338,9 @@ local function takeOwnership(fighter: Fighter)
 	end
 end
 
--- Give physics back to the client (flight over, stun over, or leaving the arena).
-local function release(fighter: Fighter)
+-- Give physics back to the client (flight, stun, dash or ULTIMATE over, or leaving
+-- the arena). `facing` optionally sets the heading the body stands up with.
+local function release(fighter: Fighter, facing: Vector3?)
 	local mover = fighter.mover
 	mover.velocity.Enabled = false
 	mover.velocity.VectorVelocity = Vector3.zero
@@ -321,6 +368,10 @@ local function release(fighter: Fighter)
 	if heading.Magnitude < 0.2 then
 		local down = -cframe.UpVector -- rolled onto its side: Right is near vertical
 		heading = Vector3.new(down.X, 0, down.Z)
+	end
+	local flatFacing = if facing then Vector3.new(facing.X, 0, facing.Z) else Vector3.zero
+	if flatFacing.Magnitude > 1e-3 then
+		heading = flatFacing
 	end
 	if heading.Magnitude > 1e-3 then
 		-- If the body is lying on the floor, stand it at proper height so the legs don't sink in.
@@ -379,24 +430,24 @@ local function stun(fighter: Fighter, duration: number, facing: Vector3)
 end
 
 --[[
-	TUMBLE: a non-lethal hit sends the victim flying along the kick with real
-	physics (server-owned, gravity on, constraints off) for HitTumbleTime. The
-	victim can't launch until it ends; then stepHolds hands physics back. Near
-	an edge a tumble can carry them off the arena, which is credited to the
-	attacker as a KO (Config.Health.LastHitCredit).
+	TUMBLE: a strike that doesn't explode the victim sends them flying along the
+	kick with real physics (server-owned, gravity on, constraints off) for
+	HitTumbleTime. The victim can't launch until it ends; then stepHolds hands
+	physics back. Near an edge a tumble can carry them off the arena, which is
+	credited to the attacker as a KO (Config.Strikes.LastHitCredit).
 ]]
 local function tumble(fighter: Fighter, direction: Vector3)
 	local t = now()
 	takeOwnership(fighter) -- also PlatformStand: the body goes limp and tumbles
-	fighter.stunUntil = t + HEALTH.HitTumbleTime
-	fighter.holdUntil = t + HEALTH.HitTumbleTime
+	fighter.stunUntil = t + STRIKES.HitTumbleTime
+	fighter.holdUntil = t + STRIKES.HitTumbleTime
 	fighter.player:SetAttribute(ATTR.Stunned, true)
 
 	fighter.mover.velocity.Enabled = false
 	fighter.mover.align.Enabled = false
 	local flat = Vector3.new(direction.X, 0, direction.Z)
 	local push = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.zero
-	fighter.root.AssemblyLinearVelocity = push * HEALTH.HitFlingSpeed + Vector3.yAxis * HEALTH.HitFlingLift
+	fighter.root.AssemblyLinearVelocity = push * STRIKES.HitFlingSpeed + Vector3.yAxis * STRIKES.HitFlingLift
 	fighter.root.AssemblyAngularVelocity = push:Cross(Vector3.yAxis) * -6 -- head-over-heels spin
 end
 
@@ -473,13 +524,12 @@ local function broadcastEta(flight: Flight, t: number, force: boolean?)
 	end
 end
 
--- `damage` is only set for a "Hit". The rally/speed/damage numbers are what the
--- victim's hit card shows, so "who hit me and why" is always answered.
+-- The rally / speed / strike numbers are what the victim's hit card shows, so
+-- "who hit me and why" is always answered.
 local function broadcastResolved(
 	flight: Flight,
 	outcome: Types.KickOutcome,
 	perfect: boolean,
-	damage: number?,
 	at: Vector3? -- where it happened (defaults to the kicker's position)
 )
 	local target = flight.target
@@ -493,11 +543,46 @@ local function broadcastResolved(
 		position = at or flight.attacker.root.Position,
 		rally = flight.rally,
 		speed = flight.speed,
-		damage = damage or 0,
-		health = target.health,
-		lethal = outcome == "Hit" and target.health <= 0,
+		strikes = target.strikes,
+		exploded = outcome == "Hit" and target.strikes >= STRIKES.ToExplode,
+		ultimate = false,
 	}
 	net().KickResolved:FireAllClients(payload)
+end
+
+-- A landed ULTIMATE shares KickResolved (and so all of the hit feedback) with kicks.
+local function broadcastUltimateHit(ult: UltimateState, exploded: boolean)
+	local payload: Types.KickResolvedPayload = {
+		kickId = ult.id,
+		outcome = "Hit",
+		attackerId = ult.attacker.player.UserId,
+		targetId = ult.target.player.UserId,
+		perfect = false,
+		direction = ult.direction,
+		position = ult.impactPoint,
+		rally = 0,
+		speed = ult.speed,
+		strikes = ult.target.strikes,
+		exploded = exploded,
+		ultimate = true,
+	}
+	net().KickResolved:FireAllClients(payload)
+end
+
+-- The ULTIMATE telegraph every client draws (leap, impact marker, miss, cancel).
+local function fireUltimate(ult: UltimateState, stage: Types.UltimateStage)
+	local diving = ult.stage == "Dive"
+	local payload: Types.UltimatePayload = {
+		stage = stage,
+		id = ult.id,
+		userId = ult.attacker.player.UserId,
+		targetId = ult.target.player.UserId,
+		diveAt = ult.diveAt,
+		impactPoint = if diving then ult.impactPoint else nil,
+		impactAt = if diving then ult.impactAt else nil,
+		radius = ULT.Radius,
+	}
+	net().Ultimate:FireAllClients(payload)
 end
 
 local function sendParryFeedback(fighter: Fighter, result: Types.ParryResult, kickId: number)
@@ -528,7 +613,7 @@ end
 ]]
 local function recentAttacker(fighter: Fighter): Player?
 	local by = fighter.lastHitBy
-	if by and now() - fighter.lastHitAt <= HEALTH.LastHitCredit then
+	if by and now() - fighter.lastHitAt <= STRIKES.LastHitCredit then
 		return by
 	end
 	return nil
@@ -574,15 +659,7 @@ local function blastBack(fighter: Fighter, origin: Vector3, axis: Vector3, gap: 
 		return
 	end
 
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local exclude: { Instance } = {}
-	for _, fighter in fighters do
-		table.insert(exclude, fighter.character)
-	end
-	params.FilterDescendantsInstances = exclude
-
-	local hit = Workspace:Raycast(start, destination - start, params)
+	local hit = Workspace:Raycast(start, destination - start, excludeFighters())
 	if hit then
 		destination = hit.Position - axis * 2 -- stop just short of the wall
 	end
@@ -726,46 +803,125 @@ local function cancelFlight(flight: Flight)
 	broadcastResolved(flight, "Cancelled", false)
 end
 
+-- Strikes and the ULTIMATE meter -------------------------------------------------------
+
 --[[
-	No valid parry arrived during the clash window: the kick lands.
-	Damage scales with the kick's speed (CombatMath.hitDamage), so a fast rally
-	hurts far more than an opening kick. At 0 HP the victim is Defeated;
-	otherwise they tumble away and the GameMode hears about it via Damaged.
-	A victim who was mid-kick themselves is knocked out of the air.
+	ULTIMATE meter (0..1). It fills from landed kicks, parries and slowly over
+	time. The attribute is only written in 2% steps (or when it empties or
+	fills), so the passive trickle doesn't replicate every frame.
 ]]
-local function resolveHit(flight: Flight)
-	local attacker, target = flight.attacker, flight.target
-	finishFlight(flight)
-	release(attacker)
+local function setCharge(fighter: Fighter, value: number)
+	fighter.ultCharge = math.clamp(value, 0, 1)
+	local charge = fighter.ultCharge
+	if charge >= 1 or charge == 0 or math.abs(charge - fighter.ultPublished) >= 0.02 then
+		fighter.ultPublished = charge
+		fighter.player:SetAttribute(ATTR.UltCharge, charge)
+	end
+end
+
+local function addCharge(fighter: Fighter, amount: number)
+	if fighter.ultimate == nil and fighter.ultCharge < 1 then
+		setCharge(fighter, fighter.ultCharge + amount)
+	end
+end
+
+-- Drop an ULTIMATE from the registries (no broadcast, no physics change).
+local function endUltimate(ult: UltimateState)
+	ultimates[ult.id] = nil
+	local attacker = ult.attacker
+	if attacker.ultimate == ult then
+		attacker.ultimate = nil
+	end
+	attacker.player:SetAttribute(ATTR.Ultimate, false)
+end
+
+-- Abort the ULTIMATE this fighter is performing, if any. Does NOT release their
+-- physics. `refund` gives the meter back (the abort wasn't their fault).
+local function cancelUltimate(fighter: Fighter, refund: boolean)
+	local ult = fighter.ultimate
+	if ult == nil then
+		return
+	end
+	endUltimate(ult)
+	if refund then
+		setCharge(fighter, 1)
+	end
+	fireUltimate(ult, "Cancelled")
+end
+
+-- A strike knocks the victim out of whatever they were doing: their own kick
+-- (cancelled) and their ULTIMATE (cancelled, no refund).
+local function interrupt(target: Fighter)
 	local ownKick = target.flight
 	if ownKick then
 		finishFlight(ownKick)
 		broadcastResolved(ownKick, "Cancelled", false)
 	end
+	cancelUltimate(target, false)
+end
 
-	local damage = CombatMath.hitDamage(flight.speed, KICK.BaseSpeed, HEALTH.BaseDamage, HEALTH.DamageExponent)
-	target.health = math.max(target.health - damage, 0)
+-- Land `count` strikes on `target` (1 per kick, ULT.Strikes for an ULTIMATE).
+-- Returns true if that was the finishing strike.
+local function addStrikes(attacker: Fighter, target: Fighter, count: number): boolean
+	target.strikes = math.min(target.strikes + count, STRIKES.ToExplode)
 	target.lastHitBy = attacker.player
 	target.lastHitAt = now()
-	target.player:SetAttribute(ATTR.Health, target.health)
-	broadcastResolved(flight, "Hit", flight.perfect, damage) -- perfect: a Perfect counter-dash (hits harder)
+	target.player:SetAttribute(ATTR.Strikes, target.strikes)
+	return target.strikes >= STRIKES.ToExplode
+end
 
-	if target.health <= 0 then
-		defeat(target, attacker.player, "Kick")
-	else
-		tumble(target, flight.direction)
-		damaged:Fire(target.player, attacker.player, damage, target.health)
+--[[
+	After a strike has been broadcast.
+	  * The finishing strike explodes the victim: Defeated(victim, attacker,
+	    "Kick"), the mode eliminates them and every client plays the explosion.
+	    The kicker carries THROUGH the blast and lands FinisherPushBack studs past
+	    it, standing with their back to it (the classic finisher pose).
+	  * Any other strike sends the victim tumbling along the kick, and the mode
+	    hears about it through Struck.
+]]
+local function afterStrike(attacker: Fighter, target: Fighter, direction: Vector3, exploded: boolean)
+	if not exploded then
+		release(attacker)
+		tumble(target, direction)
+		struck:Fire(target.player, attacker.player, target.strikes)
+		return
 	end
+	local flat = Vector3.new(direction.X, 0, direction.Z)
+	local look = attacker.root.CFrame.LookVector
+	local through = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.new(look.X, 0, look.Z)
+	if through.Magnitude > 1e-3 then
+		blastBack(attacker, target.root.Position, through.Unit, STRIKES.FinisherPushBack)
+	end
+	release(attacker, through)
+	defeat(target, attacker.player, "Kick")
+end
+
+--[[
+	No valid parry arrived during the clash window: the kick lands. One strike.
+	The third explodes the victim; otherwise they tumble away. A victim who was
+	mid-kick (or mid-ULTIMATE) is knocked out of it.
+]]
+local function resolveHit(flight: Flight)
+	local attacker, target = flight.attacker, flight.target
+	finishFlight(flight)
+	interrupt(target)
+	local exploded = addStrikes(attacker, target, 1)
+	addCharge(attacker, ULT.ChargePerHit)
+	broadcastResolved(flight, "Hit", flight.perfect) -- perfect: it was a Perfect counter-dash
+	afterStrike(attacker, target, flight.direction, exploded)
 end
 
 --[[
 	SUCCESSFUL PARRY
 	  1. The attacker's momentum is cancelled: blasted back to the RICOCHET GAP
-	     set by the defender's stance (CombatMath.ricochetGap), then stunned
-	     mid-air for StunTime.
+	     set by the defender's stance (CombatMath.ricochetGap), tightened by the
+	     DUEL rule (each parry in the rally pulls the pair closer, see
+	     CombatMath.duelGap), then stunned mid-air for StunTime.
 	  2. The defender instantly ricochets (even if they were mid-kick themselves),
 	     at the attacker or at the redirect target it was locked onto, with
 	     rally + 1 (compounding +10%) and the one-shot Perfect boost if earned.
+	  3. Both are now "in a duel" for SpamWindow: a Block that misses costs them
+	     nothing, so the exchange turns into the close-range mash of kicks.
 ]]
 local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighter?)
 	local attacker, defender = flight.attacker, flight.target
@@ -774,15 +930,20 @@ local function resolveParry(flight: Flight, perfect: boolean, redirectTo: Fighte
 	local axis = attacker.root.Position - defender.root.Position
 	axis = if axis.Magnitude > 1e-3 then axis.Unit else -flight.direction
 	local approachSpeed = trustedVelocity(defender):Dot(axis) -- > 0: stepping in, < 0: backpedalling
-	local gap = CombatMath.ricochetGap(
+	local stanceGap = CombatMath.ricochetGap(
 		approachSpeed,
 		PARRY.RicochetGap,
 		PARRY.StanceFactor,
 		PARRY.RicochetGapMin,
 		PARRY.RicochetGapMax
 	)
+	local gap = CombatMath.duelGap(stanceGap, flight.rally + 1, DUEL.GapShrink, DUEL.MinGap)
+	local t = now()
+	attacker.duelUntil = t + DUEL.SpamWindow
+	defender.duelUntil = t + DUEL.SpamWindow
 	attacker.lastHitBy = defender.player -- if the blast knocks them off the arena, the defender gets the credit
-	attacker.lastHitAt = now()
+	attacker.lastHitAt = t
+	addCharge(defender, ULT.ChargePerParry)
 	stun(attacker, PARRY.StunTime, -axis)
 	blastBack(attacker, defender.root.Position, axis, gap)
 
@@ -800,7 +961,7 @@ end
 
 --[[
 	HEAD-ON CLASH: two fighters kicking EACH OTHER meet in the middle. Neither
-	kick lands: both bounce apart and hang stunned for a beat, with no damage, and
+	kick lands: both bounce apart and hang stunned for a beat, no strike for either, and
 	the rally ends. Without this rule, whichever flight the server happened to
 	step first would win.
 ]]
@@ -818,8 +979,8 @@ local function resolveHeadOn(a: Flight, b: Flight)
 	stun(second, KICK.ClashStun, axis)
 	blastBack(first, middle, axis, KICK.ClashGap / 2)
 	blastBack(second, middle, -axis, KICK.ClashGap / 2)
-	broadcastResolved(a, "Clashed", false, nil, middle) -- spark where they met, not where they bounced to
-	broadcastResolved(b, "Clashed", false, nil, middle)
+	broadcastResolved(a, "Clashed", false, middle) -- spark where they met, not where they bounced to
+	broadcastResolved(b, "Clashed", false, middle)
 end
 
 -- Contact reached: hold the "clash frame" while a late-arriving parry can still land.
@@ -948,7 +1109,7 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 	if gap <= KICK.ImpactRadius + flight.speed * dt then
 		local counter = target.flight
 		if counter and counter.active and counter.target == attacker and counter.phase ~= "Clash" then
-			resolveHeadOn(flight, counter) -- we kicked each other: bounce, no damage
+			resolveHeadOn(flight, counter) -- we kicked each other: bounce, no strike
 		else
 			enterClash(flight, t)
 		end
@@ -958,6 +1119,156 @@ local function stepFlight(flight: Flight, t: number, dt: number)
 	velocity.VectorVelocity = flight.direction * flight.speed
 	attacker.mover.align.CFrame = feetFirst(flight.direction)
 	broadcastEta(flight, t)
+end
+
+-- ULTIMATE ------------------------------------------------------------------------------
+
+--[[
+	ULTIMATE: a charged, unblockable finisher kick in two telegraphed stages.
+	  Leap  (LeapTime): the performer springs up and forward toward the target
+	         (clients play the flip). Every client already sees it coming.
+	  Dive  (DiveTime): at the top of the leap the impact point LOCKS where the
+	         target stands, a marker appears there, and the performer dives at
+	         it in a straight line. It does NOT home: the counterplay is to DASH
+	         (or run) out of the marked zone before it lands.
+	It is not a Flight and never enters the target's `incoming`, so Block can't
+	touch it. The performer is committed (no Block, no kicks), and a kick that
+	lands on them during either stage cancels it.
+]]
+local function startUltimate(attacker: Fighter, target: Fighter, t: number)
+	nextKickId += 1
+	setCharge(attacker, 0)
+
+	local start = attacker.root.Position
+	local offset = target.root.Position - start
+	local flat = Vector3.new(offset.X, 0, offset.Z)
+	local look = Vector3.new(attacker.root.CFrame.LookVector.X, 0, attacker.root.CFrame.LookVector.Z)
+	local heading = if flat.Magnitude > 1e-3
+		then flat.Unit
+		elseif look.Magnitude > 1e-3 then look.Unit
+		else Vector3.zAxis
+	local apex = start + flat * ULT.LeapForward + Vector3.yAxis * ULT.LeapHeight
+	local ceiling = Workspace:Raycast(start, apex - start, excludeFighters())
+	if ceiling then
+		apex = ceiling.Position - (apex - start).Unit * 2 -- don't leap into a roof
+	end
+
+	local ult: UltimateState = {
+		id = nextKickId,
+		attacker = attacker,
+		target = target,
+		stage = "Leap",
+		diveAt = t + ULT.LeapTime,
+		apex = apex,
+		direction = heading,
+		impactPoint = target.root.Position,
+		impactAt = t + ULT.LeapTime + ULT.DiveTime,
+		speed = 0,
+		held = false,
+	}
+	attacker.ultimate = ult
+	ultimates[ult.id] = ult
+	attacker.lastHitBy = nil -- acting again: an old hit no longer gets credit for a later fall
+	attacker.holdUntil = 0 -- supersedes a dash in progress
+
+	takeOwnership(attacker)
+	local mover = attacker.mover
+	mover.velocity.VectorVelocity = (apex - start) / ULT.LeapTime
+	mover.velocity.Enabled = true
+	mover.align.CFrame = CFrame.lookAt(Vector3.zero, heading)
+	mover.align.Enabled = true
+	setCollisionGroup(attacker.character, Config.CollisionGroups.Flying)
+	attacker.player:SetAttribute(ATTR.Ultimate, true)
+	fireUltimate(ult, "Leap")
+end
+
+-- The dive has arrived: the target is struck if still inside the zone.
+local function resolveUltimate(ult: UltimateState)
+	local attacker, target = ult.attacker, ult.target
+	endUltimate(ult)
+	attacker.mover.velocity.VectorVelocity = Vector3.zero
+	attacker.root.CFrame = CFrame.new(ult.impactPoint) * attacker.root.CFrame.Rotation
+	attacker.kickReadyAt = now() + KICK.Cooldown
+	attacker.player:SetAttribute(ATTR.KickReadyAt, attacker.kickReadyAt)
+
+	-- A cylinder, so jumping straight up doesn't dodge it: only leaving the zone does.
+	local offset = target.root.Position - ult.impactPoint
+	local inZone = isAlive(target)
+		and Vector3.new(offset.X, 0, offset.Z).Magnitude <= ULT.Radius
+		and math.abs(offset.Y) <= ULT.Radius
+	if not inZone then
+		attacker.kickReadyAt += ULT.MissRecovery -- whiffed a finisher: an opening for the dodger
+		attacker.player:SetAttribute(ATTR.KickReadyAt, attacker.kickReadyAt)
+		fireUltimate(ult, "Miss")
+		release(attacker)
+		return
+	end
+
+	interrupt(target)
+	local exploded = addStrikes(attacker, target, ULT.Strikes)
+	broadcastUltimateHit(ult, exploded)
+	afterStrike(attacker, target, ult.direction, exploded)
+end
+
+-- One Heartbeat of one ULTIMATE.
+local function stepUltimate(ult: UltimateState, t: number, dt: number)
+	local attacker, target = ult.attacker, ult.target
+	if not isAlive(attacker) then
+		endUltimate(ult) -- (defeat / unregistering releases the physics)
+		fireUltimate(ult, "Cancelled")
+		return
+	end
+
+	local mover = attacker.mover
+	if beingStruck(attacker) then
+		-- A kick has made contact with the performer: hang until that verdict
+		-- (a hit cancels the ULTIMATE). The clock pauses with it.
+		mover.velocity.VectorVelocity = Vector3.zero
+		ult.diveAt += dt
+		ult.impactAt += dt
+		ult.held = true
+		return
+	end
+	if ult.held then
+		ult.held = false
+		fireUltimate(ult, ult.stage) -- the timings moved: re-sync every client's telegraph
+	end
+
+	if ult.stage == "Leap" then
+		if not isAlive(target) then
+			cancelUltimate(attacker, true) -- target left mid-leap: not the performer's fault, refund
+			release(attacker)
+			return
+		end
+		if t < ult.diveAt then
+			-- Arrive at the apex exactly at diveAt, whatever the frame rate.
+			mover.velocity.VectorVelocity = (ult.apex - attacker.root.Position) / math.max(ult.diveAt - t, dt)
+			return
+		end
+
+		-- Top of the leap: lock the impact point where the target stands NOW.
+		local from = attacker.root.Position
+		local aim = target.root.Position
+		local blocked = Workspace:Raycast(from, aim - from, excludeFighters())
+		if blocked then
+			aim = blocked.Position - (aim - from).Unit * 2 -- dive into the wall, not through it
+		end
+		local path = aim - from
+		ult.stage = "Dive"
+		ult.impactPoint = aim
+		ult.impactAt = t + ULT.DiveTime
+		ult.direction = if path.Magnitude > 1e-3 then path.Unit else -Vector3.yAxis
+		ult.speed = path.Magnitude / ULT.DiveTime
+		mover.align.CFrame = feetFirst(ult.direction)
+		fireUltimate(ult, "Dive")
+	end
+
+	if t < ult.impactAt then
+		-- Straight line, arriving exactly at impactAt (the marker's countdown).
+		mover.velocity.VectorVelocity = (ult.impactPoint - attacker.root.Position) / math.max(ult.impactAt - t, dt)
+		return
+	end
+	resolveUltimate(ult)
 end
 
 -- Leg Style handle --------------------------------------------------------------------
@@ -1075,6 +1386,16 @@ end
 
 -- Remote handlers ------------------------------------------------------------------------
 
+-- The claimed camera must be near the body (exploits often "aim" from the target),
+-- and the target inside a generous cone of it (the same dot product the client uses).
+local function cameraPlausible(attacker: Fighter, camera: CFrame, targetPosition: Vector3): boolean
+	local maxCameraDistance = attacker.player.CameraMaxZoomDistance + Config.Targeting.CameraSlack
+	if (camera.Position - attacker.root.Position).Magnitude > maxCameraDistance then
+		return false
+	end
+	return Targeting.isPlausible(camera, targetPosition, Config.Targeting.ServerMinDot)
+end
+
 --[[
 	RequestLaunch(targetUserId, cameraCFrame)
 	The client says who its lock-on dot is on. The server re-checks EVERYTHING:
@@ -1091,7 +1412,13 @@ local function onLaunchRequest(player: Player, rawTargetId: unknown, rawCamera: 
 		return
 	end
 	local t = now()
-	if attacker.flight or t < attacker.stunUntil or t < attacker.kickReadyAt or beingStruck(attacker) then
+	if
+		attacker.flight
+		or attacker.ultimate
+		or t < attacker.stunUntil
+		or t < attacker.kickReadyAt
+		or beingStruck(attacker)
+	then
 		return -- (being struck: a kick has already made contact; only a Block can still save you)
 	end
 
@@ -1116,20 +1443,19 @@ local function onLaunchRequest(player: Player, rawTargetId: unknown, rawCamera: 
 		return
 	end
 
-	-- The claimed camera must be near the body (exploits often "aim" from the target)...
-	local maxCameraDistance = player.CameraMaxZoomDistance + Config.Targeting.CameraSlack
-	if (camera.Position - attacker.root.Position).Magnitude > maxCameraDistance then
-		return
-	end
-	-- ...and the target inside a generous cone of that camera (same dot product as the client).
-	if not Targeting.isPlausible(camera, target.root.Position, Config.Targeting.ServerMinDot) then
+	if not cameraPlausible(attacker, camera, target.root.Position) then
 		return
 	end
 
 	startFlight(attacker, target, 0, false, false) -- a fresh kick starts a new rally at base speed
 end
 
+-- A Block that parried nothing. Mid-duel, mashing Block IS the game, so a miss
+-- costs nothing (and says nothing); otherwise it costs WhiffCooldown.
 local function whiff(defender: Fighter, t: number, result: Types.ParryResult, kickId: number)
+	if t < defender.duelUntil then
+		return
+	end
 	defender.parryLockUntil = t + PARRY.WhiffCooldown
 	sendParryFeedback(defender, result, kickId)
 end
@@ -1171,7 +1497,10 @@ end
 	   A forged stamp or a manipulated ETA fails here even if step 2 passed.
 
 	4. Anti-spam. Any Block that parries nothing costs WhiffCooldown, so mashing
-	   F (or a naive macro) locks you out exactly when the kick arrives.
+	   F (or a naive macro) locks you out exactly when the kick arrives. The
+	   exception is a DUEL (SpamWindow after a parry you were part of): a
+	   close-range exchange is too fast to time, so there mashing is free, and
+	   the timing and distance checks still decide every parry.
 
 	With several kicks incoming, Block answers the one the client named, or if
 	that one is gone or wasn't named, the one closest to landing.
@@ -1182,8 +1511,8 @@ local function onParryRequest(player: Player, rawKickId: unknown, rawStamp: unkn
 		return
 	end
 	local defender = fighters[player]
-	if defender == nil or not isAlive(defender) then
-		return
+	if defender == nil or not isAlive(defender) or defender.ultimate then
+		return -- (mid-ULTIMATE: committed, no blocking)
 	end
 	if receivedAt < defender.parryLockUntil then
 		sendParryFeedback(defender, "Cooldown", 0)
@@ -1242,7 +1571,11 @@ local function onParryRequest(player: Player, rawKickId: unknown, rawStamp: unkn
 	end
 
 	local perfect = verdict == "Perfect"
-	recordIntegrity(player, flight, tti, perfect, pressedAt)
+	if not flight.predictable and receivedAt >= defender.duelUntil then
+		-- Duel mashing lands near-identical "perfect" timings by design, and a
+		-- ricochet straight back at you is anticipated; only genuine reads count.
+		recordIntegrity(player, flight, tti, perfect, pressedAt)
+	end
 	sendParryFeedback(defender, verdict, flight.id)
 	resolveParry(flight, perfect, resolveRedirect(defender, flight.attacker, rawLockId))
 end
@@ -1264,12 +1597,115 @@ local function onAbilityRequest(player: Player)
 	end
 end
 
+--[[
+	RequestDash(direction)
+	A quick dodge burst: DASH.Distance studs in DASH.Time along the requested
+	direction (flattened; the body's facing if it's zero). The SERVER moves the
+	body (it takes ownership for the burst, like a flight), so the client can't
+	stretch it, and it stops short of walls. Not while flying, mid-ULTIMATE,
+	stunned / tumbling, or already struck. Juggernaut runners may dash too: it
+	is a dodge, not an attack.
+]]
+local function onDashRequest(player: Player, rawDirection: unknown)
+	if not dashLimiter:check(player) then
+		return
+	end
+	local fighter = fighters[player]
+	if fighter == nil or not isAlive(fighter) then
+		return
+	end
+	local t = now()
+	if t < fighter.dashReadyAt or fighter.flight or fighter.ultimate or fighter.serverOwned or beingStruck(fighter) then
+		return -- (serverOwned: stunned, tumbling or already dashing)
+	end
+
+	local raw = Guard.vector3(rawDirection)
+	local flat = if raw then Vector3.new(raw.X, 0, raw.Z) else Vector3.zero
+	if flat.Magnitude < 1e-3 then
+		local look = fighter.root.CFrame.LookVector
+		flat = Vector3.new(look.X, 0, look.Z)
+		if flat.Magnitude < 1e-3 then
+			return
+		end
+	end
+	local direction = flat.Unit
+	local distance = DASH.Distance
+	local wall = Workspace:Raycast(fighter.root.Position, direction * distance, excludeFighters())
+	if wall then
+		distance = wall.Distance - 2
+	end
+	if distance < 1 then
+		return -- pressed into a wall: nothing to do, keep the cooldown
+	end
+
+	fighter.dashReadyAt = t + DASH.Cooldown
+	player:SetAttribute(ATTR.DashReadyAt, fighter.dashReadyAt) -- clients draw the trail from this too
+	takeOwnership(fighter)
+	fighter.holdUntil = t + DASH.Time * distance / DASH.Distance -- stepHolds hands physics back after
+	local mover = fighter.mover
+	mover.velocity.VectorVelocity = direction * (DASH.Distance / DASH.Time)
+	mover.velocity.Enabled = true
+	mover.align.CFrame = CFrame.lookAt(Vector3.zero, direction)
+	mover.align.Enabled = true
+	setCollisionGroup(fighter.character, Config.CollisionGroups.Flying) -- slip past bodies
+end
+
+--[[
+	RequestUltimate(targetUserId, cameraCFrame)
+	The meter must be full and the mode must let this player attack
+	(rules.canLaunch, so a Juggernaut runner can't). The target is re-checked
+	like a kick (alive, in ULT.MaxRange, mode rules, camera plausibility). The
+	kick cooldown does NOT apply: the meter is the gate.
+]]
+local function onUltimateRequest(player: Player, rawTargetId: unknown, rawCamera: unknown)
+	if not ultimateLimiter:check(player) then
+		return
+	end
+	local attacker = fighters[player]
+	if attacker == nil or not isAlive(attacker) or not rules.canLaunch(player) then
+		return
+	end
+	local t = now()
+	if
+		attacker.ultCharge < 1
+		or attacker.ultimate
+		or attacker.flight
+		or t < attacker.stunUntil
+		or beingStruck(attacker)
+	then
+		return
+	end
+
+	local targetPlayer = Guard.player(rawTargetId)
+	local camera = Guard.cframe(rawCamera)
+	local target = if targetPlayer then fighters[targetPlayer] else nil
+	if target == nil or camera == nil or not isEligibleTarget(attacker, target) then
+		return
+	end
+	if (target.root.Position - attacker.root.Position).Magnitude > ULT.MaxRange then
+		return
+	end
+	if not cameraPlausible(attacker, camera, target.root.Position) then
+		return
+	end
+	startUltimate(attacker, target, t)
+end
+
 -- Per-frame systems ------------------------------------------------------------------------
 
 local function stepHolds(t: number)
 	for _, fighter in fighters do
-		if fighter.holdUntil > 0 and fighter.flight == nil and t >= fighter.holdUntil then
-			release(fighter) -- stun over: physics back to the client, gravity takes over
+		if fighter.holdUntil > 0 and fighter.flight == nil and fighter.ultimate == nil and t >= fighter.holdUntil then
+			release(fighter) -- stun / tumble / dash over: physics back to the client, gravity takes over
+		end
+	end
+end
+
+-- The ULTIMATE meter's slow passive fill, for anyone the mode lets attack.
+local function stepCharge(dt: number)
+	for player, fighter in fighters do
+		if not fighter.defeated and rules.canLaunch(player) then
+			addCharge(fighter, ULT.ChargePerSecond * dt)
 		end
 	end
 end
@@ -1344,7 +1780,18 @@ local function onHeartbeat(dt: number)
 		end
 	end
 
+	local performing = {}
+	for _, ult in ultimates do
+		table.insert(performing, ult)
+	end
+	for _, ult in performing do
+		if ultimates[ult.id] == ult then
+			stepUltimate(ult, t, dt)
+		end
+	end
+
 	stepHolds(t)
+	stepCharge(dt)
 	stepMovement(t)
 end
 
@@ -1377,9 +1824,14 @@ function CombatService.registerCombatant(player: Player): boolean
 		mover = createMover(root),
 		connections = {},
 		defeated = false,
-		health = HEALTH.MaxHealth,
+		strikes = 0,
 		lastHitBy = nil,
 		lastHitAt = 0,
+		duelUntil = 0,
+		dashReadyAt = 0,
+		ultCharge = 0,
+		ultPublished = 0,
+		ultimate = nil,
 		flight = nil,
 		incoming = {},
 		kickReadyAt = 0,
@@ -1400,7 +1852,7 @@ function CombatService.registerCombatant(player: Player): boolean
 		fighter.connections,
 		character.DescendantAdded:Connect(function(descendant: Instance)
 			if descendant:IsA("BasePart") then
-				descendant.CollisionGroup = if fighter.flight
+				descendant.CollisionGroup = if fighter.flight or fighter.ultimate
 					then Config.CollisionGroups.Flying
 					else Config.CollisionGroups.Characters
 			end
@@ -1421,9 +1873,12 @@ function CombatService.registerCombatant(player: Player): boolean
 		end)
 	)
 
-	player:SetAttribute(ATTR.MaxHealth, HEALTH.MaxHealth)
-	player:SetAttribute(ATTR.Health, HEALTH.MaxHealth)
+	player:SetAttribute(ATTR.StrikesToExplode, STRIKES.ToExplode)
+	player:SetAttribute(ATTR.Strikes, 0)
 	player:SetAttribute(ATTR.KickReadyAt, 0)
+	player:SetAttribute(ATTR.DashReadyAt, 0)
+	player:SetAttribute(ATTR.UltCharge, 0) -- the meter starts empty every round
+	player:SetAttribute(ATTR.Ultimate, false)
 	player:SetAttribute(ATTR.InArena, true)
 	return true
 end
@@ -1439,6 +1894,7 @@ function CombatService.unregisterCombatant(player: Player)
 	if fighter.flight then
 		cancelFlight(fighter.flight)
 	end
+	cancelUltimate(fighter, false)
 	-- Every kick still chasing them lands harmlessly (snapshot: cancelling edits the map).
 	local chasing = {}
 	for _, flight in fighter.incoming do
@@ -1465,8 +1921,11 @@ function CombatService.unregisterCombatant(player: Player)
 	player:SetAttribute(ATTR.KickReadyAt, nil)
 	player:SetAttribute(ATTR.Flying, false)
 	player:SetAttribute(ATTR.Stunned, false)
-	player:SetAttribute(ATTR.Health, nil) -- health bars only exist in the arena
-	player:SetAttribute(ATTR.MaxHealth, nil)
+	player:SetAttribute(ATTR.Strikes, nil) -- strike pips only exist in the arena
+	player:SetAttribute(ATTR.StrikesToExplode, nil)
+	player:SetAttribute(ATTR.DashReadyAt, nil)
+	player:SetAttribute(ATTR.UltCharge, nil)
+	player:SetAttribute(ATTR.Ultimate, nil)
 	AbilityService.forget(player)
 end
 
@@ -1482,6 +1941,7 @@ function CombatService.reset()
 	for _, player in everyone do
 		CombatService.unregisterCombatant(player)
 	end
+	table.clear(ultimates)
 end
 
 -- Injected by the RoundManager: the active GameMode's launch/targeting rules.
@@ -1495,10 +1955,10 @@ function CombatService.getRecentAttacker(player: Player): Player?
 	return if fighter then recentAttacker(fighter) else nil
 end
 
--- Current HP of a combatant (nil if not in the arena). Used for the round-timeout tiebreak.
-function CombatService.getHealth(player: Player): number?
+-- Strikes a combatant has taken (nil if not in the arena). Used for the round-timeout tiebreak.
+function CombatService.getStrikes(player: Player): number?
 	local fighter = fighters[player]
-	return if fighter then fighter.health else nil
+	return if fighter then fighter.strikes else nil
 end
 
 -- Exposed for UI / tests: the exact speed the server would use.
@@ -1522,6 +1982,8 @@ function CombatService.init(netRemotes: Net.Remotes)
 	netRemotes.RequestLaunch.OnServerEvent:Connect(onLaunchRequest)
 	netRemotes.RequestParry.OnServerEvent:Connect(onParryRequest)
 	netRemotes.RequestAbility.OnServerEvent:Connect(onAbilityRequest)
+	netRemotes.RequestDash.OnServerEvent:Connect(onDashRequest)
+	netRemotes.RequestUltimate.OnServerEvent:Connect(onUltimateRequest)
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		local fighter = fighters[player]

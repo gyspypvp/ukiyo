@@ -8,7 +8,7 @@ The repo is a [Rojo](https://rojo.space) project (`default.project.json`). This 
 ReplicatedStorage
 ├── Shared                               (Folder · src/shared)
 │   ├── Config            ModuleScript   every tuning number (frozen)
-│   ├── CombatMath        ModuleScript   pure math: speed compounding, parry verdict, lag comp, ricochet gap
+│   ├── CombatMath        ModuleScript   pure math: speed compounding, parry verdict, lag comp, ricochet + duel gap
 │   ├── Targeting         ModuleScript   camera dot-product lock-on (client picks, server re-checks)
 │   ├── Net               ModuleScript   NETWORK BRIDGE: declares/creates every remote, attribute names
 │   ├── Types             ModuleScript   network payload types
@@ -23,7 +23,7 @@ ServerScriptService
     ├── Main              Script         entry point: init order + mode registration
     ├── ServerTypes       ModuleScript   GameMode / RoundContext / CombatRules contracts
     ├── Services
-    │   ├── CombatService     ModuleScript   SERVER COMBAT MODULE: physics, parry validation, speed
+    │   ├── CombatService     ModuleScript   SERVER COMBAT MODULE: physics, parry validation, speed, strikes, DASH, ULTIMATE
     │   ├── RoundManager      ModuleScript   phase state machine, delegates rules to the GameMode
     │   ├── LatencyService    ModuleScript   nonce-ping RTT (lag-compensation budget)
     │   ├── AbilityService    ModuleScript   Leg Style behaviours (server truth)
@@ -39,9 +39,11 @@ ServerScriptService
 StarterPlayer
 └── StarterPlayerScripts
     └── Client                           (Folder · src/client)
-        ├── CombatController  LocalScript    CLIENT COMBAT CONTROLLER: lock-on, input, remotes, warning UI
-        ├── CombatFX          ModuleScript   cosmetic effects (aura, sparks, decoys, invis, damage numbers)
-        ├── HitFeedback       ModuleScript   health bars, hit card (who hit you + why), kill-cam
+        ├── CombatController  LocalScript    CLIENT COMBAT CONTROLLER: lock-on, five action buttons, remotes, warning UI
+        ├── CombatFX          ModuleScript   cosmetic effects (shockwaves, explosion, ULTIMATE marker, decoys, popups)
+        ├── RiderKick         ModuleScript   procedural flying-kick pose, ULTIMATE flip, glowing kick foot
+        ├── HitFeedback       ModuleScript   strike pips, hit card (who hit you + why), kill-cam
+        ├── UiTheme           ModuleScript   the shared UI look (glass panels, round buttons, colours, fonts)
         └── RoundController   LocalScript    phase HUD, Final Duel FOV + music, winner banner
 ```
 
@@ -53,12 +55,12 @@ Only two kinds of top-level code run: one server `Script` (`Main`) and two clien
 |---|---|---|
 | *When* things happen (phases, timers, teleports, payouts) | `RoundManager` | mode-agnostic |
 | *What the rules are* (who may kick, who may be kicked, what a KO means, win condition) | the active `GameMode` | swappable |
-| Kick physics, contact, parry validation, speed | `CombatService` | asks the mode via `CombatRules` |
+| Kick physics, contact, parry validation, speed, strikes, DASH, ULTIMATE | `CombatService` | asks the mode via `CombatRules` |
 | Latency budget | `LatencyService` | consumed by `CombatService` |
 | Ability behaviour | `AbilityService` | gets a narrow `FlightControl` handle, never the raw flight |
 | Economy | `PlayerDataService`, `BettingService` | all mutations server-side |
 | Input, lock-on, warning UI | `CombatController` | sends intent only |
-| Cosmetics and hit feedback | `CombatFX`, `HitFeedback`, `RoundController` | never affect gameplay |
+| Cosmetics and hit feedback | `CombatFX`, `RiderKick`, `HitFeedback`, `RoundController` | never affect gameplay |
 
 ## How modularity works
 
@@ -67,15 +69,15 @@ Only two kinds of top-level code run: one server `Script` (`Main`) and two clien
       ▲   │                                               │
       │   │  RoundContext                                 │ Signals (deferred):
       │   ▼  {getAlive, isAlive, eliminate}               │  Defeated(victim, attacker?, cause)
-      │   GameMode (Surge | Juggernaut)                   │  Damaged(victim, attacker, damage, hp)
+      │   GameMode (Surge | Juggernaut)                   │  Struck(victim, attacker, strikes)
       │     canLaunch / canTarget / onDefeated /          │  Parried(defender, attacker, perfect, rally)
-      │     onDamaged / getResult / isFinalPhase          │  Launched, Flagged
-      └──────────── forwards Defeated / Damaged / Parried ◀┘
+      │     onStruck / getResult / isFinalPhase           │  Launched, Flagged
+      └──────────── forwards Defeated / Struck / Parried ◀┘
 ```
 
-- **CombatService never decides who wins or who gets eliminated.** When a kick lands it applies speed-scaled damage. It fires `Damaged(victim, attacker, damage, hp)` if the victim survives, or `Defeated(victim, attacker, "Kick")` at 0 HP, and stops there. The mode decides what each means: Surge eliminates at 0 HP; a future Juggernaut could give the tagger extra HP.
-- **Who may kick, and whom, are rules, not hard-codes.** Before any launch CombatService asks `rules.canLaunch(player)`, and before any launch or redirect `rules.canTarget(attacker, target)`. Surge lets every survivor kick anyone; Juggernaut lets only the tagger start kicks and lets runners hit only the tagger. The RoundManager also blocks kicking during the spawn countdown.
-- **Combat mechanics stay in CombatService.** Cooldowns, one kick in the air per player, several kicks per target, Block-while-flying and head-on clashes are the same in every mode; modes never touch flights.
+- **CombatService never decides who wins or who gets eliminated.** When a kick lands it adds a strike (an ULTIMATE adds two). It fires `Struck(victim, attacker, strikes)` if the victim survives it, or `Defeated(victim, attacker, "Kick")` on the finishing strike, and stops there. The mode decides what each means: Surge eliminates the exploded player; a future Juggernaut could make the tagger take more strikes.
+- **Who may attack, and whom, are rules, not hard-codes.** Before any kick or ULTIMATE CombatService asks `rules.canLaunch(player)`, and before any launch, redirect or ULTIMATE `rules.canTarget(attacker, target)`. Surge lets every survivor kick anyone; Juggernaut lets only the tagger start kicks and ULTIMATEs and lets runners hit only the tagger (runners can still Block and DASH). The RoundManager also blocks attacking during the spawn countdown.
+- **Combat mechanics stay in CombatService.** Cooldowns, one kick in the air per player, several kicks per target, Block-while-flying, head-on clashes, duels, DASH and the ULTIMATE meter are the same in every mode; modes never touch flights.
 - **Signals are deferred.** Handlers run after CombatService finishes its current update, so a mode calling `eliminate()` → `unregisterCombatant()` can never re-enter half-updated combat state.
 
 ### Adding the Juggernaut mode (or any mode)
@@ -96,8 +98,8 @@ Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDue
 
 - **Spawning:** up to 15 eligible players are shuffled onto arena spawns, then `CombatService.registerCombatant` gives each a LinearVelocity rig (disabled) and the `CK_Characters` collision group.
 - **Active:** kicking unlocks (`canLaunch` is false during Spawning). `mode:onRoundStart` runs, then the RoundManager ticks `mode:getResult` / `isFinalPhase` / `onTick` every 0.1 s.
-- **Hit survived:** damage applied, victim knocked out of the air if mid-kick, tumbles for 0.7 s (server-owned physics), attacker paid `CoinsPerHit`, mode `onDamaged`.
-- **KO (0 HP, knocked off, died, left):** CombatService fires `Defeated` → the mode calls `ctx.eliminate(victim, killer, cause)` → combatant unregistered, killer paid, client flings itself (cosmetic), kill-cam on the killer → teleported to the lobby after 1.25 s to spectate and bet.
+- **Strike survived:** +1 strike, victim knocked out of whatever they were doing (their kick or ULTIMATE), tumbles for 0.7 s (server-owned physics), attacker paid `CoinsPerHit`, mode `onStruck`.
+- **KO (exploded, knocked off, died, left):** CombatService fires `Defeated` → the mode calls `ctx.eliminate(victim, killer, cause)` → combatant unregistered, killer paid. On an explosion every client plays the blast and hides the body, the finishing kicker lands past it with their back turned, and the victim gets a kill-cam on the killer → teleported to the lobby after 1.25 s to spectate and bet.
 - **MatchEnd:** winner payout, participation coins, bets settled (refunded if there's no single winner), survivors return to the lobby.
 - A crash inside a round is caught (`xpcall`), combat is reset, and the loop continues.
 
@@ -112,6 +114,7 @@ Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDue
 | Auto-parry / forged timestamps | stamp clamped to measured RTT; timing **and** distance checks; whiff cooldown; no pre-press; metronome / inhuman-reaction heuristics |
 | Faking low ping | random-nonce pings can only make RTT look worse; median plus engine cross-check plus a 0.25 s cap bound "worse" |
 | Kick spam / kicking at anyone | server re-checks mode `canLaunch`, one-kick-in-the-air, stun, kick cooldown, range, mode `canTarget`, camera plausibility |
+| Dash / ULTIMATE abuse | the server moves the body for a dash (fixed distance, wall-clamped, cooldown); the ULTIMATE meter is server-side, the dive is server-driven, and the hit is a server radius check at impact |
 | Remote spam / malformed args | token-bucket rate limits on every remote; `Guard` validates type, NaN/inf and range |
 | Economy tampering | coins, upgrades, crates and bets are server-side; receipts are idempotent |
 | Falling out of the map to dodge | below `KillY` counts as a KO |
