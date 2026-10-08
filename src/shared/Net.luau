@@ -44,13 +44,15 @@ export type Remotes = {
 	Effect: RemoteEvent, -- (Types.EffectPayload), all clients
 	Ultimate: RemoteEvent, -- (Types.UltimatePayload), all clients: leap / dive / miss / cancel
 	RoundEvent: RemoteEvent, -- (Types.RoundEventPayload), all clients
+	ProfileUpdated: RemoteEvent, -- (Types.ProfileSnapshot, notice: string?), owner only, on every profile change
 
 	-- Lobby request/response (RemoteFunction, Client -> Server ONLY)
-	GetProfile: RemoteFunction, -- () -> ProfileSnapshot
+	GetProfile: RemoteFunction, -- () -> Types.ProfileSnapshot?
 	PurchaseUpgrade: RemoteFunction, -- (statId: string) -> (ok: boolean, message: string)
 	SpinCrate: RemoteFunction, -- () -> (ok: boolean, styleIdOrError: string, duplicate: boolean)
+	BuyCrateKey: RemoteFunction, -- () -> (ok: boolean, message: string)  (Coins, Config.Monetization.KeyCoinPrice)
 	EquipLegStyle: RemoteFunction, -- (styleId: string) -> (ok: boolean, message: string)
-	PlaceBet: RemoteFunction, -- (targetUserId: number, amount: number) -> (ok: boolean, message: string)
+	PlaceBet: RemoteFunction, -- (targetUserId: number, amount: number) -> (ok: boolean, message: string, multiplier: number?)
 }
 
 local Net = {}
@@ -66,6 +68,8 @@ Net.Attributes = table.freeze({
 	Stunned = "CK_Stunned", -- boolean: frozen mid-air after being parried, or tumbling after a hit
 	Strikes = "CK_Strikes", -- number: kicks this player has taken this round (in the arena only)
 	StrikesToExplode = "CK_StrikesToExplode", -- number: strikes that explode them (drives the strike pips)
+	LegStyle = "CK_LegStyle", -- string: equipped Leg Style id (the SKILL button shows it)
+	SkillUsed = "CK_SkillUsed", -- number: Leg Style activations used this round (nil = none)
 	Flagged = "CK_Flagged", -- string: integrity flag reason (moderation tooling)
 })
 
@@ -158,10 +162,12 @@ local function build(isServer: boolean): Remotes
 		Effect = event("Effect"),
 		Ultimate = event("Ultimate"),
 		RoundEvent = event("RoundEvent"),
+		ProfileUpdated = event("ProfileUpdated"),
 
 		GetProfile = func("GetProfile"),
 		PurchaseUpgrade = func("PurchaseUpgrade"),
 		SpinCrate = func("SpinCrate"),
+		BuyCrateKey = func("BuyCrateKey"),
 		EquipLegStyle = func("EquipLegStyle"),
 		PlaceBet = func("PlaceBet"),
 	}

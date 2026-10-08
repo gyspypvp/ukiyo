@@ -11,6 +11,8 @@
 
 	Every economy action is server-side: the client only *asks* through the
 	lobby RemoteFunctions, and every argument is validated and rate-limited.
+	Whenever a profile changes, its owner is sent a fresh snapshot
+	(ProfileUpdated, coalesced to one per frame), so the lobby UI never polls.
 ]]
 
 local DataStoreService = game:GetService("DataStoreService")
@@ -22,6 +24,7 @@ local Shared = ReplicatedStorage.Shared
 local AbilityData = require(Shared.AbilityData)
 local Config = require(Shared.Config)
 local Net = require(Shared.Net)
+local Types = require(Shared.Types)
 local UpgradeData = require(Shared.UpgradeData)
 
 local Guard = require(script.Parent.Parent.Util.Guard)
@@ -43,19 +46,13 @@ export type Profile = {
 	Receipts: { string }, -- recent PurchaseIds, makes ProcessReceipt idempotent
 }
 
-export type ProfileSnapshot = {
-	coins: number,
-	crateKeys: number,
-	upgrades: { [string]: number },
-	ownedStyles: { string },
-	equippedStyle: string,
-	wins: number,
-	kills: number,
-}
+export type ProfileSnapshot = Types.ProfileSnapshot
 
 local PlayerDataService = {}
 
 local profiles: { [Player]: Profile } = {}
+local remotes: Net.Remotes? = nil
+local pendingPush: { [Player]: { notice: string? } } = {} -- coalesces pushes to one per frame
 local lobbyLimiter = RateLimiter.new(Config.RateLimits.Lobby.rate, Config.RateLimits.Lobby.burst)
 local rng = Random.new()
 
@@ -235,7 +232,37 @@ local function snapshot(profile: Profile): ProfileSnapshot
 	}
 end
 
+--[[
+	Send the owner a fresh snapshot. Many changes can land in one frame (a kill
+	pays coins, a bet settles), so pushes are coalesced: the first change in a
+	frame schedules one deferred send, and the latest notice wins.
+]]
+local function pushProfile(player: Player, notice: string?)
+	local pending = pendingPush[player]
+	if pending then
+		pending.notice = notice or pending.notice
+		return
+	end
+	pendingPush[player] = { notice = notice }
+	task.defer(function()
+		local entry = pendingPush[player]
+		pendingPush[player] = nil
+		local profile = profiles[player]
+		local net = remotes
+		if entry and profile and net and player.Parent then
+			net.ProfileUpdated:FireClient(player, snapshot(profile), entry.notice)
+		end
+	end)
+end
+
 -- Public API -------------------------------------------------------------------
+
+-- Tell the owner something about their coins (e.g. "Your bet won +240"); also refreshes their snapshot.
+function PlayerDataService.notify(player: Player, notice: string)
+	if profiles[player] then
+		pushProfile(player, notice)
+	end
+end
 
 function PlayerDataService.get(player: Player): Profile?
 	return profiles[player]
@@ -252,6 +279,7 @@ function PlayerDataService.addCoins(player: Player, amount: number)
 	end
 	profile.Coins = math.max(0, profile.Coins + math.floor(amount))
 	syncLeaderstats(player)
+	pushProfile(player)
 end
 
 -- Deducts `amount` only if the player can afford it. Returns success.
@@ -262,6 +290,7 @@ function PlayerDataService.trySpend(player: Player, amount: number): boolean
 	end
 	profile.Coins -= amount
 	syncLeaderstats(player)
+	pushProfile(player)
 	return true
 end
 
@@ -270,6 +299,7 @@ function PlayerDataService.recordWin(player: Player)
 	if profile then
 		profile.Wins += 1
 		syncLeaderstats(player)
+		pushProfile(player)
 	end
 end
 
@@ -277,6 +307,7 @@ function PlayerDataService.recordKill(player: Player)
 	local profile = profiles[player]
 	if profile then
 		profile.Kills += 1
+		pushProfile(player)
 	end
 end
 
@@ -309,6 +340,7 @@ local function purchaseUpgrade(player: Player, rawStat: unknown): (boolean, stri
 	end
 	profile.Upgrades[stat] = level + 1
 	applyStats(player)
+	pushProfile(player)
 	return true, `{UpgradeData.Stats[stat].displayName} is now level {level + 1}`
 end
 
@@ -325,7 +357,26 @@ local function spinCrate(player: Player): (boolean, string, boolean)
 	else
 		profile.OwnedStyles[style.id] = true
 	end
+	pushProfile(player)
 	return true, style.id, duplicate
+end
+
+-- The free path to crates: one key for Config.Monetization.KeyCoinPrice Coins (0 disables it).
+local function buyCrateKey(player: Player): (boolean, string)
+	local profile = profiles[player]
+	local price = Config.Monetization.KeyCoinPrice
+	if profile == nil then
+		return false, "Profile still loading"
+	end
+	if price <= 0 then
+		return false, "Keys can't be bought with Coins"
+	end
+	if not PlayerDataService.trySpend(player, price) then
+		return false, "Not enough coins"
+	end
+	profile.CrateKeys += 1
+	pushProfile(player)
+	return true, "Crate key bought"
 end
 
 local function equipStyle(player: Player, rawStyleId: unknown): (boolean, string)
@@ -335,7 +386,10 @@ local function equipStyle(player: Player, rawStyleId: unknown): (boolean, string
 		return false, "You don't own that style"
 	end
 	profile.EquippedStyle = styleId
-	return true, "Equipped"
+	player:SetAttribute(Net.Attributes.LegStyle, styleId)
+	pushProfile(player)
+	local style = AbilityData.get(styleId)
+	return true, `{if style then style.displayName else styleId} equipped`
 end
 
 -- Developer Product receipts (crate keys). Idempotent via the receipt history.
@@ -359,10 +413,12 @@ local function processReceipt(receiptInfo: { [string]: any }): Enum.ProductPurch
 		table.remove(profile.Receipts, 1)
 	end
 	saveProfile(player)
+	pushProfile(player, "Crate key added")
 	return Enum.ProductPurchaseDecision.PurchaseGranted
 end
 
-function PlayerDataService.init(remotes: Net.Remotes)
+function PlayerDataService.init(netRemotes: Net.Remotes)
+	remotes = netRemotes
 	local function onPlayerAdded(player: Player)
 		local profile = loadProfile(player)
 		if player.Parent == nil then
@@ -370,6 +426,8 @@ function PlayerDataService.init(remotes: Net.Remotes)
 		end
 		profiles[player] = profile
 		syncLeaderstats(player)
+		player:SetAttribute(Net.Attributes.LegStyle, profile.EquippedStyle)
+		pushProfile(player) -- the client may have asked GetProfile before this loaded
 		player.CharacterAdded:Connect(function()
 			applyStats(player)
 		end)
@@ -384,6 +442,7 @@ function PlayerDataService.init(remotes: Net.Remotes)
 	Players.PlayerRemoving:Connect(function(player: Player)
 		saveProfile(player)
 		profiles[player] = nil
+		pendingPush[player] = nil
 	end)
 
 	game:BindToClose(function()
@@ -403,26 +462,32 @@ function PlayerDataService.init(remotes: Net.Remotes)
 	end)
 
 	-- Every lobby RemoteFunction is rate-limited and returns plain data only.
-	remotes.GetProfile.OnServerInvoke = function(player: Player): ProfileSnapshot?
+	netRemotes.GetProfile.OnServerInvoke = function(player: Player): ProfileSnapshot?
 		local profile = profiles[player]
 		if profile == nil or not lobbyLimiter:check(player) then
 			return nil
 		end
 		return snapshot(profile)
 	end
-	remotes.PurchaseUpgrade.OnServerInvoke = function(player: Player, rawStat: unknown): (boolean, string)
+	netRemotes.PurchaseUpgrade.OnServerInvoke = function(player: Player, rawStat: unknown): (boolean, string)
 		if not lobbyLimiter:check(player) then
 			return false, "Slow down"
 		end
 		return purchaseUpgrade(player, rawStat)
 	end
-	remotes.SpinCrate.OnServerInvoke = function(player: Player): (boolean, string, boolean)
+	netRemotes.SpinCrate.OnServerInvoke = function(player: Player): (boolean, string, boolean)
 		if not lobbyLimiter:check(player) then
 			return false, "Slow down", false
 		end
 		return spinCrate(player)
 	end
-	remotes.EquipLegStyle.OnServerInvoke = function(player: Player, rawStyleId: unknown): (boolean, string)
+	netRemotes.BuyCrateKey.OnServerInvoke = function(player: Player): (boolean, string)
+		if not lobbyLimiter:check(player) then
+			return false, "Slow down"
+		end
+		return buyCrateKey(player)
+	end
+	netRemotes.EquipLegStyle.OnServerInvoke = function(player: Player, rawStyleId: unknown): (boolean, string)
 		if not lobbyLimiter:check(player) then
 			return false, "Slow down"
 		end

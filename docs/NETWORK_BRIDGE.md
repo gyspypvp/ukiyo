@@ -39,6 +39,7 @@ All remotes are declared in one place, [`src/shared/Net.luau`](../src/shared/Net
 | `ParryFeedback` | RemoteEvent | the presser only | `result, kickId, lockUntil` | "PERFECT!" / "TOO EARLY"; authoritative whiff-cooldown time |
 | `Effect` | RemoteEvent | all | `EffectPayload` | Leg Style visuals (invisibility, decoys, glitch) |
 | `RoundEvent` | RemoteEvent | all | `RoundEventPayload` (incl. `cause`: Kick / Void / Died / Left) | winner banner, KO feed, "knocked off by" card |
+| `ProfileUpdated` | RemoteEvent | the profile's owner | `ProfileSnapshot, notice?` | pushed on every profile change (coalesced to one per frame), so the lobby never polls; `notice` carries messages like "Your bet on X won: +240 coins" |
 
 ### Client → Server: lobby (`RemoteFunction`, request/response)
 
@@ -49,8 +50,9 @@ Used only in the lobby. These are never on the combat path, all are rate-limited
 | `GetProfile` | `() -> ProfileSnapshot?` |
 | `PurchaseUpgrade` | `(statId) -> (ok, message)` |
 | `SpinCrate` | `() -> (ok, styleIdOrError, duplicate)` |
+| `BuyCrateKey` | `() -> (ok, message)` (Coins, `Config.Monetization.KeyCoinPrice`; 0 disables it) |
 | `EquipLegStyle` | `(styleId) -> (ok, message)` |
-| `PlaceBet` | `(targetUserId, amount) -> (ok, message)` |
+| `PlaceBet` | `(targetUserId, amount) -> (ok, message, multiplier?)` (the locked odds, for the lobby's bet summary) |
 
 ### Attributes (persistent replicated state)
 
@@ -64,6 +66,8 @@ Used only in the lobby. These are never on the combat path, all are rate-limited
 | `Player` | `CK_Flying` | currently a missile |
 | `Player` | `CK_Stunned` | frozen mid-air after being parried, or tumbling after a hit |
 | `Player` | `CK_Strikes`, `CK_StrikesToExplode` | strikes taken this round and how many explode you (drive the HUD + overhead strike pips); removed when out of the arena |
+| `Player` | `CK_LegStyle` | equipped Leg Style id (the SKILL button shows it) |
+| `Player` | `CK_SkillUsed` | Leg Style activations used this round (SKILL button "x2" uses left) |
 | `Player` | `CK_Flagged` | integrity heuristic tripped (for moderation tooling) |
 | `ReplicatedStorage.ClashKickState` | `Phase`, `PhaseEndsAt`, `Mode`, `AliveCount`, `RoundId` | round state machine; `PhaseEndsAt` is server time |
 

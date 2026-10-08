@@ -194,6 +194,24 @@ test("lanes start fully spread and converge on the target", function()
 	near(CombatMath.laneDecay(5, 50, 9), 0)
 end)
 
+-- Bet odds ----------------------------------------------------------------------------------------------
+
+test("bet odds: nobody struck pays alive * edge", function()
+	-- 5 fighters, 3 kicks left each: 0.8 * 15 / 3 = 4.0 = 5 * 0.8
+	near(CombatMath.betMultiplier(15, 3, 5, 0.8, 1.2), 4.0)
+end)
+
+test("bet odds: an untouched favourite pays less, never below the floor", function()
+	-- 3 alive: target untouched (3 left), the others on their last kick (1 + 1): 0.8 * 5 / 3
+	near(CombatMath.betMultiplier(5, 3, 3, 0.8, 1.2), 1.3333333333333333, 1e-12)
+	near(CombatMath.betMultiplier(4, 3, 3, 0.2, 1.2), 1.2)
+end)
+
+test("bet odds: an underdog never pays more than the crowded-arena cap", function()
+	-- target on their last kick among untouched rivals: 0.8 * 7 / 1 = 5.6, capped at 3 * 0.8
+	near(CombatMath.betMultiplier(7, 1, 3, 0.8, 1.2), 2.4)
+end)
+
 -- Statistics --------------------------------------------------------------------------------------------
 
 test("median handles odd, even and empty inputs", function()

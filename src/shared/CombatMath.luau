@@ -178,6 +178,27 @@ function CombatMath.duelGap(stanceGap: number, rally: number, shrink: number, mi
 end
 
 --[[
+	Bet odds, locked when a bet is placed. Priced by the target's share of the
+	kicks the arena can still take before exploding (strikes are public, so flat
+	odds would make backing the untouched fighter free money):
+
+	    multiplier = clamp(edge * totalKicksLeft / targetKicksLeft,
+	                       minMultiplier, max(alive * edge, minMultiplier))
+
+	Shared so the lobby's odds preview is exactly what the server will lock in.
+]]
+function CombatMath.betMultiplier(
+	totalKicksLeft: number,
+	targetKicksLeft: number,
+	alive: number,
+	edge: number,
+	minMultiplier: number
+): number
+	local cap = math.max(alive * edge, minMultiplier)
+	return math.clamp(edge * totalKicksLeft / math.max(targetKicksLeft, 1), minMultiplier, cap)
+end
+
+--[[
 	Shadow Clone lanes converge on the target: full lateral spread at activation,
 	zero spread once the gap shrinks to `convergeDistance`.
 ]]

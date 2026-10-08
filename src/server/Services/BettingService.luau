@@ -6,14 +6,16 @@
 	current round. Odds are locked when the bet is placed and priced by the
 	target's share of the kicks the arena can still take before exploding
 	(strikes are public, so flat odds would make backing the untouched fighter
-	free money):
+	free money); see CombatMath.betMultiplier, which the lobby UI also uses
+	for its preview:
 
 	    multiplier = clamp(BetHouseEdge * totalKicksLeft / targetKicksLeft,
 	                       MinBetMultiplier, aliveAtBet * BetHouseEdge)
 
 	With nobody struck yet that is aliveAtBet * BetHouseEdge: an early bet on a
 	crowded arena pays a lot. An untouched favourite pays less, and an
-	underdog's payout never exceeds the crowded-arena maximum.
+	underdog's payout never exceeds the crowded-arena maximum. Every bettor is
+	told how their bet ended (PlayerDataService.notify).
 	Betting closes at the Final Duel (2 alive) so nobody can farm near-certain
 	outcomes. Coins are taken up front; a round with no single winner refunds.
 ]]
@@ -21,6 +23,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage.Shared
+local CombatMath = require(Shared.CombatMath)
 local Config = require(Shared.Config)
 local Net = require(Shared.Net)
 
@@ -30,6 +33,7 @@ local PlayerDataService = require(script.Parent.PlayerDataService)
 
 type Bet = {
 	targetId: number,
+	targetName: string,
 	amount: number,
 	multiplier: number,
 }
@@ -42,7 +46,7 @@ local isAliveFn: ((Player) -> boolean)? = nil
 local getAliveFn: (() -> { Player })? = nil
 local limiter = RateLimiter.new(Config.RateLimits.Lobby.rate, Config.RateLimits.Lobby.burst)
 
-local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown): (boolean, string)
+local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown): (boolean, string, number?)
 	local isAlive, getAlive = isAliveFn, getAliveFn
 	if not isOpen or isAlive == nil or getAlive == nil then
 		return false, "Betting is closed"
@@ -81,14 +85,16 @@ local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown
 	for _, player in alivePlayers do
 		totalLeft += kicksLeft(player)
 	end
-	local edge = Config.Rewards.BetHouseEdge
-	local multiplier = math.clamp(
-		edge * totalLeft / kicksLeft(target),
-		Config.Rewards.MinBetMultiplier,
-		math.max(alive * edge, Config.Rewards.MinBetMultiplier)
-	)
-	bets[player] = { targetId = target.UserId, amount = amount, multiplier = multiplier }
-	return true, string.format("Bet %d on %s at x%.1f", amount, target.DisplayName, multiplier)
+	local rewards = Config.Rewards
+	local multiplier =
+		CombatMath.betMultiplier(totalLeft, kicksLeft(target), alive, rewards.BetHouseEdge, rewards.MinBetMultiplier)
+	bets[player] = {
+		targetId = target.UserId,
+		targetName = target.DisplayName,
+		amount = amount,
+		multiplier = multiplier,
+	}
+	return true, string.format("Bet %d on %s at x%.1f", amount, target.DisplayName, multiplier), multiplier
 end
 
 -- Called by the RoundManager when a round goes live.
@@ -108,8 +114,13 @@ function BettingService.settle(winner: Player?)
 		end
 		if winner == nil then
 			PlayerDataService.addCoins(bettor, bet.amount)
+			PlayerDataService.notify(bettor, `No single winner: your {bet.amount} coins are refunded`)
 		elseif bet.targetId == winner.UserId then
-			PlayerDataService.addCoins(bettor, math.floor(bet.amount * bet.multiplier))
+			local payout = math.floor(bet.amount * bet.multiplier)
+			PlayerDataService.addCoins(bettor, payout)
+			PlayerDataService.notify(bettor, `Your bet on {bet.targetName} won: +{payout} coins`)
+		else
+			PlayerDataService.notify(bettor, `Your bet on {bet.targetName} lost`)
 		end
 	end
 	table.clear(bets)
@@ -120,9 +131,9 @@ function BettingService.init(remotes: Net.Remotes)
 		player: Player,
 		rawTargetId: unknown,
 		rawAmount: unknown
-	): (boolean, string)
+	): (boolean, string, number?)
 		if not limiter:check(player) then
-			return false, "Slow down"
+			return false, "Slow down", nil
 		end
 		return placeBet(player, rawTargetId, rawAmount)
 	end

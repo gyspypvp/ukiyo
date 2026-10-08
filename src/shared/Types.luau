@@ -82,6 +82,17 @@ export type UltimatePayload = {
 	radius: number?, -- Dive: hit radius around impactPoint
 }
 
+-- Server -> owner (GetProfile reply, and pushed on every change via ProfileUpdated).
+export type ProfileSnapshot = {
+	coins: number,
+	crateKeys: number,
+	upgrades: { [string]: number }, -- UpgradeData.StatId -> level
+	ownedStyles: { string }, -- Leg Style ids, sorted
+	equippedStyle: string,
+	wins: number,
+	kills: number,
+}
+
 export type RoundEventKind = "Winner" | "Draw" | "Eliminated" | "NoContest"
 
 -- Why a fighter went down. The GameMode decides what each cause means.

@@ -41,6 +41,7 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local AbilityData = require(Shared:WaitForChild("AbilityData"))
 local Config = require(Shared:WaitForChild("Config"))
 local Net = require(Shared:WaitForChild("Net"))
 local Targeting = require(Shared:WaitForChild("Targeting"))
@@ -184,6 +185,16 @@ local function canDashNow(t: number): boolean
 		and not isTrue(ATTR.Stunned)
 		and not isTrue(ATTR.Ultimate)
 		and t >= numberAttr(ATTR.DashReadyAt)
+end
+
+-- The equipped Leg Style and how many activations it has left this round.
+local function skillUsesLeft(): (AbilityData.LegStyle?, number)
+	local styleId = localPlayer:GetAttribute(ATTR.LegStyle)
+	local style = AbilityData.get(if typeof(styleId) == "string" then styleId else AbilityData.DefaultStyleId)
+	if style == nil then
+		return nil, 0
+	end
+	return style, math.max(style.usesPerRound - numberAttr(ATTR.SkillUsed), 0)
 end
 
 local function isAliveCharacter(player: Player): boolean
@@ -542,8 +553,11 @@ local function updateButtons(t: number)
 	hud.dash.scale.Scale = if mustDodge then 1.08 + 0.06 * math.sin(t * 24) else 1
 	hud.dash.ring.Thickness = if mustDodge then 4.5 else 2.5
 
-	-- SKILL: only usable mid-kick (once per kick, server-checked).
-	showCooldown(hud.skill, t, 0, 0, isTrue(ATTR.Flying))
+	-- SKILL: your Leg Style, mid-kick, a few times per round (server-checked):
+	-- "x2" uses left, or NONE without a style (equip one in the lobby).
+	local style, usesLeft = skillUsesLeft()
+	showCooldown(hud.skill, t, 0, 0, isTrue(ATTR.Flying) and usesLeft > 0)
+	hud.skill.timer.Text = if style == nil or style.usesPerRound <= 0 then "NONE" else `x{usesLeft}`
 
 	-- ULTIMATE: the meter fills the button; full = pulsing ring.
 	local charge = numberAttr(ATTR.UltCharge)
@@ -665,7 +679,17 @@ end
 
 -- SKILL: the equipped Leg Style, mid-kick only.
 local function requestSkill()
-	if isTrue(ATTR.Flying) then
+	if not isTrue(ATTR.InArena) then
+		return
+	end
+	local style, usesLeft = skillUsesLeft()
+	if style == nil or style.usesPerRound <= 0 then
+		CombatFX.toast("NO LEG STYLE: EQUIP ONE IN THE LOBBY", COLORS.SubText)
+	elseif usesLeft <= 0 then
+		CombatFX.toast("SKILL USED UP THIS ROUND", COLORS.SubText)
+	elseif not isTrue(ATTR.Flying) then
+		CombatFX.toast("SKILL WORKS MID-KICK", COLORS.SubText)
+	else
 		remotes.RequestAbility:FireServer()
 	end
 end

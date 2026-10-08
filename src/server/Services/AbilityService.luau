@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage.Shared
 local AbilityData = require(Shared.AbilityData)
+local Net = require(Shared.Net)
 local Types = require(Shared.Types)
 
 local PlayerDataService = require(script.Parent.PlayerDataService)
@@ -93,15 +94,20 @@ function AbilityService.tryActivate(player: Player, control: FlightControl): Typ
 		return nil
 	end
 	usesThisRound[player] = used + 1
+	player:SetAttribute(Net.Attributes.SkillUsed, used + 1) -- the SKILL button shows uses left
 	return behavior(control, style)
 end
 
 function AbilityService.resetRound()
+	for player in usesThisRound do
+		player:SetAttribute(Net.Attributes.SkillUsed, nil)
+	end
 	table.clear(usesThisRound)
 end
 
 function AbilityService.forget(player: Player)
 	usesThisRound[player] = nil
+	player:SetAttribute(Net.Attributes.SkillUsed, nil)
 end
 
 return AbilityService

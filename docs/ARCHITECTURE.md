@@ -44,7 +44,8 @@ StarterPlayer
         ├── RiderKick         ModuleScript   procedural flying-kick pose, ULTIMATE flip, glowing kick foot
         ├── HitFeedback       ModuleScript   strike pips, hit card (who hit you + why), kill-cam
         ├── UiTheme           ModuleScript   the shared UI look (glass panels, round buttons, colours, fonts)
-        └── RoundController   LocalScript    phase HUD, Final Duel FOV + music, winner banner
+        ├── RoundController   LocalScript    phase HUD, Final Duel FOV + music, winner banner
+        └── LobbyController   LocalScript    lobby dock + panel: SHOP / STYLES / CRATE / BET, wallet
 ```
 
 Only two kinds of top-level code run: one server `Script` (`Main`) and two client `LocalScript`s. Everything else is a ModuleScript with an explicit `init`, so the start-up order is visible in one file.

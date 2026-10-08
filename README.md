@@ -49,9 +49,20 @@ Optional: `SoundService/ClashKickMusic` with `Lobby`, `Battle`, `Duel` Sounds. S
 | **BLOCK** / parry (mash it freely during a duel) | **F** | L1 | **BLOCK** button |
 | **KICK** (any time; 1.25 s cooldown after landing) | Left click | R2 | **KICK** button |
 | **DASH**: an 18-stud dodge burst where you're moving (2 s cooldown) | **Q** | B | **DASH** button |
-| **SKILL**: your Leg Style, mid-kick | **E** | Y | **SKILL** button |
+| **SKILL**: your Leg Style, mid-kick (the button shows uses left this round, or NONE) | **E** | Y | **SKILL** button |
 | **ULTIMATE**: unblockable leap-and-dive kick, when the meter is full | **R** | X | **ULT** button |
 | Redirect | aim your camera so the red dot is on someone else, then Block | | |
+
+In the lobby (before a round, or after you're out) a dock at the bottom opens the **lobby panel**:
+
+| Tab | What it does |
+|---|---|
+| **SHOP** | stat upgrades for Coins: level, current → next value, price |
+| **STYLES** | every Leg Style; equip the ones you own, the rest come from crates |
+| **CRATE** | drop odds, your keys, buy a key with Coins (`Config.Monetization.KeyCoinPrice`, 600; set 0 for Robux only) or Robux (once `CrateKeyProductId` is set), and a reel that lands on what the server rolled |
+| **BET** | while you're out of the round: the fighters still alive with live odds; pick one and an amount. Closes at the Final Duel |
+
+Coins and keys refresh live: the server pushes every profile change (`ProfileUpdated`), and bet results arrive as a toast.
 
 The HUD is one clean, generic style of its own (`UiTheme`): dark glass panels, round buttons with one accent colour per action, and one sans-serif font family. On phones every button sits under the right thumb, clear of the thumbstick and the Jump button.
 
@@ -80,7 +91,8 @@ The HUD is one clean, generic style of its own (`UiTheme`): dark glass panels, r
 | Upgrades | `UpgradeData`, `PlayerDataService` | WalkSpeed / JumpPower / ParryWindow (+0.05 s max) for Coins |
 | Leg Styles | `AbilityData`, `AbilityService`, `CombatFX` | Lag Switch (freeze 0.5 s → blink), Invis-Dash, Shadow Clone (3 lanes, 1 real hitbox); weighted crate roll |
 | Round loop + Final Duel | `RoundManager`, `RoundController` | Intermission 15 s → Spawning → Active → FinalDuel (FOV 70→84, music swap) → MatchEnd payout |
-| Betting | `BettingService` | eliminated / lobby players bet; odds locked at bet time; closes at the Final Duel |
+| Betting | `BettingService`, `CombatMath.betMultiplier`, `LobbyController` | eliminated / lobby players bet from the BET tab; odds locked at bet time (the tab previews them with the same function); closes at the Final Duel; every bettor is told how it ended |
+| Lobby | `LobbyController`, `PlayerDataService` | SHOP / STYLES / CRATE / BET panel, coins + keys wallet, all requests server-validated, profile pushed on every change |
 
 ## Design decisions where the GDD was open
 
@@ -120,7 +132,6 @@ stylua --check src tests
 
 ## Not built yet
 
-- Lobby shop / crate / betting **UI** (the server remotes are ready: `GetProfile`, `PurchaseUpgrade`, `SpinCrate`, `EquipLegStyle`, `PlaceBet`)
 - Keyframed animations, art assets, sound effects (the kick pose is procedural, and its angles are tuning by eye: check them in Studio and adjust `RiderKick`); a spectator camera for eliminated players; AFK toggle
 - Session-locked persistence. `PlayerDataService` uses plain DataStore Get/Set; swap in ProfileStore before launch (the public API stays the same).
 - Playtest tuning of every number in `Config.luau`

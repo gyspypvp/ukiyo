@@ -161,13 +161,14 @@ Config.Rewards = table.freeze({
 	WinPayout = 250, -- "massive" last-player-standing payout
 	Participation = 5,
 	MaxBet = 500,
-	BetHouseEdge = 0.8, -- bet multiplier = max(MinBetMultiplier, aliveAtBet * edge)
+	BetHouseEdge = 0.8, -- see CombatMath.betMultiplier
 	MinBetMultiplier = 1.2,
 })
 
 Config.Monetization = table.freeze({
 	CrateKeyProductId = 0, -- TODO: your Developer Product id for one Leg Style crate key
 	KeysPerPurchase = 1,
+	KeyCoinPrice = 600, -- a crate key bought with Coins in the lobby (the free path); 0 = Robux only
 	DuplicateRefundCoins = 100, -- coins granted when a crate rolls a style you already own
 })
 
