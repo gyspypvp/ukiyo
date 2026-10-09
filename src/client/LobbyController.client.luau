@@ -361,8 +361,8 @@ for index, tab: Tab in TABS do
 	local button = Instance.new("TextButton")
 	button.Name = TAB_LABEL[tab]
 	button.AutoButtonColor = false
-	button.Position = UDim2.fromOffset(16 + (index - 1) * 86, 12)
-	button.Size = UDim2.fromOffset(80, 32)
+	button.Position = UDim2.fromOffset(16 + (index - 1) * 86, 9)
+	button.Size = UDim2.fromOffset(80, 36)
 	button.BorderSizePixel = 0
 	button.Font = UiTheme.FontHeavy
 	button.TextSize = 14
@@ -477,7 +477,7 @@ for index, stat: UpgradeData.StatId in UpgradeData.Order do
 		string.upper(def.displayName)
 	label(row, UiTheme.FontBody, COLORS.SubText, 13, UDim2.fromOffset(16, 34), UDim2.fromOffset(280, 18)).Text =
 		UPGRADE_INFO[stat].blurb
-	local level = label(row, UiTheme.Font, COLORS.SubText, 12, UDim2.fromOffset(16, 58), UDim2.fromOffset(80, 18))
+	local level = label(row, UiTheme.Font, COLORS.SubText, 13, UDim2.fromOffset(16, 58), UDim2.fromOffset(80, 18))
 
 	local bar = Instance.new("Frame")
 	bar.Position = UDim2.fromOffset(96, 64)
@@ -585,7 +585,7 @@ do
 		local uses = if style.usesPerRound > 0
 			then `{style.usesPerRound} USE{if style.usesPerRound == 1 then "" else "S"} PER ROUND`
 			else "NO SKILL"
-		label(frame, UiTheme.Font, color, 12, UDim2.fromOffset(18, 30), UDim2.fromOffset(380, 16)).Text =
+		label(frame, UiTheme.Font, color, 13, UDim2.fromOffset(18, 30), UDim2.fromOffset(380, 16)).Text =
 			`{string.upper(style.rarity)} · {uses}`
 		local blurb =
 			label(frame, UiTheme.FontBody, COLORS.SubText, 13, UDim2.fromOffset(18, 48), UDim2.fromOffset(400, 34))
@@ -598,7 +598,7 @@ do
 		button.Position = UDim2.new(1, -14, 0.5, 0)
 		button.Activated:Connect(function()
 			local snapshot = profile
-			if snapshot == nil or busy or snapshot.equippedStyle == style.id then
+			if snapshot == nil or busy or spinning or snapshot.equippedStyle == style.id then
 				return
 			end
 			if not owns(style.id) then
@@ -677,7 +677,7 @@ do
 		local color = AbilityData.RarityColors[style.rarity]
 		label(oddsCard, UiTheme.FontHeavy, color, 14, UDim2.fromOffset(16, y), UDim2.fromOffset(180, 18)).Text =
 			string.upper(style.displayName)
-		label(oddsCard, UiTheme.Font, COLORS.SubText, 11, UDim2.fromOffset(16, y + 17), UDim2.fromOffset(180, 14)).Text =
+		label(oddsCard, UiTheme.Font, COLORS.SubText, 12, UDim2.fromOffset(16, y + 17), UDim2.fromOffset(180, 14)).Text =
 			string.upper(style.rarity)
 		local chance =
 			label(oddsCard, UiTheme.FontHeavy, COLORS.Text, 15, UDim2.fromOffset(196, y), UDim2.fromOffset(88, 30))
@@ -745,7 +745,7 @@ for index = 1, REEL_LENGTH do
 	name.Size = UDim2.new(1, -12, 0, 40)
 	name.TextWrapped = true
 	name.ZIndex = 7
-	local rarity = UiTheme.text(frame, UiTheme.Font, COLORS.SubText, 11)
+	local rarity = UiTheme.text(frame, UiTheme.Font, COLORS.SubText, 12)
 	rarity.Position = UDim2.new(0, 6, 1, -28)
 	rarity.Size = UDim2.new(1, -12, 0, 16)
 	rarity.ZIndex = 7
@@ -868,6 +868,9 @@ spinButton.Activated:Connect(function()
 		return
 	end
 	busy = true
+	-- The spin starts now, not when the reel does: while the request is in flight the
+	-- panel stays on CRATE (other tabs would already show the result).
+	spinning = true
 	-- Hold the wallet line as it was: the profile push for this spin (one key fewer,
 	-- maybe a duplicate refund) would otherwise give the result away before the reel lands.
 	frozenWallet = headerWallet.Text
@@ -877,7 +880,8 @@ spinButton.Activated:Connect(function()
 	end)
 	busy = false
 	local style = if ok and success == true and typeof(result) == "string" then AbilityData.get(result) else nil
-	if style == nil then
+	if style == nil or isTrue(ATTR.InArena) then
+		spinning = false
 		frozenWallet = nil
 		setStatus(if ok and typeof(result) == "string" then result else "Couldn't spin. Try again.", COLORS.Danger)
 		refresh()
@@ -971,7 +975,7 @@ do
 	table.insert(values, nil) -- MAX
 	for index = 1, #BET_CHIPS + 1 do
 		local value = values[index]
-		local chip = pillButton(betBar, if value then tostring(value) else "MAX", COLORS.Dash, UDim2.fromOffset(62, 34))
+		local chip = pillButton(betBar, if value then tostring(value) else "MAX", COLORS.Dash, UDim2.fromOffset(62, 38))
 		chip.Position = UDim2.fromOffset((index - 1) * 68, 0)
 		chip.Activated:Connect(function()
 			betChoice = value
@@ -1075,7 +1079,7 @@ local function rowFor(player: Player): BetRow
 
 	local name = label(button, UiTheme.FontHeavy, COLORS.Text, 15, UDim2.fromOffset(58, 6), UDim2.fromOffset(300, 20))
 	name.TextTruncate = Enum.TextTruncate.AtEnd
-	local strikes = label(button, UiTheme.Font, COLORS.SubText, 12, UDim2.fromOffset(58, 28), UDim2.fromOffset(300, 16))
+	local strikes = label(button, UiTheme.Font, COLORS.SubText, 13, UDim2.fromOffset(58, 28), UDim2.fromOffset(300, 16))
 	local odds = label(button, UiTheme.FontHeavy, COLORS.Dash, 18, UDim2.new(1, -110, 0, 0), UDim2.fromOffset(96, 52))
 	odds.TextXAlignment = Enum.TextXAlignment.Right
 
@@ -1256,7 +1260,7 @@ local function usingGamepad(): boolean
 end
 
 local function openTab(tab: Tab)
-	if isTrue(ATTR.InArena) or (spinning and tab ~= activeTab) then
+	if isTrue(ATTR.InArena) or (spinning and tab ~= "Crate") then
 		return -- (mid-spin: stay on the reel; the other tabs would show the result early)
 	end
 	if activeTab == nil then
@@ -1296,14 +1300,14 @@ closeButton.Activated:Connect(closePanel)
 
 -- Gamepad: D-pad up opens the lobby, L1 / R1 switch tabs, B closes. (Out of the arena
 -- none of these are combat inputs.)
-UserInputService.InputBegan:Connect(function(input: InputObject)
-	if isTrue(ATTR.InArena) then
-		return
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	if isTrue(ATTR.InArena) or GuiService.MenuIsOpen then
+		return -- (the Roblox menu uses these buttons too)
 	end
 	local key = input.KeyCode
 	local tab = activeTab
 	if tab == nil then
-		if key == Enum.KeyCode.DPadUp then
+		if key == Enum.KeyCode.DPadUp and not gameProcessed then
 			openTab(lastTab)
 		end
 	elseif key == Enum.KeyCode.ButtonB then
