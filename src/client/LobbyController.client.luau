@@ -28,6 +28,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -121,6 +122,7 @@ type MyBet = {
 	targetName: string,
 	amount: number,
 	multiplier: number,
+	outcome: Types.BetOutcome?, -- set when the server settles it
 }
 
 -- State --------------------------------------------------------------------------------
@@ -132,6 +134,8 @@ local spinning = false -- the crate reel is playing
 local myBet: MyBet? = nil
 local betTarget: Player? = nil
 local betChoice: number? = 50 -- nil = MAX
+local lastTab: Tab = "Shop" -- what the gamepad shortcut reopens
+local frozenWallet: string? = nil -- during a crate spin, the wallet line from before it (no spoilers)
 local refresh: () -> () -- defined once every widget exists
 
 -- Helpers ------------------------------------------------------------------------------
@@ -242,19 +246,33 @@ gui.Parent = playerGui
 
 -- Dock + wallet ----------------------------------------------------------------------------
 
+-- Keyboard / gamepad: one centred row on the combat buttons' baseline. Touch: a 2x2 grid
+-- bottom-right, left of Roblox's Jump button and out of the thumbstick's half of the screen.
+local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 local dock = Instance.new("Frame")
 dock.Name = "Dock"
-dock.AnchorPoint = Vector2.new(0.5, 1)
-dock.Position = UDim2.new(0.5, 0, 1, -DOCK_BOTTOM)
-dock.Size = UDim2.fromOffset(#TABS * DOCK_BUTTON + (#TABS - 1) * DOCK_GAP, DOCK_BUTTON)
 dock.BackgroundTransparency = 1
 dock.Visible = false
 dock.Parent = gui
-local dockLayout = Instance.new("UIListLayout")
-dockLayout.FillDirection = Enum.FillDirection.Horizontal
-dockLayout.Padding = UDim.new(0, DOCK_GAP)
-dockLayout.SortOrder = Enum.SortOrder.LayoutOrder
-dockLayout.Parent = dock
+if touchOnly then
+	dock.AnchorPoint = Vector2.new(1, 1)
+	dock.Position = UDim2.new(1, -184, 1, -28)
+	dock.Size = UDim2.fromOffset(2 * DOCK_BUTTON + DOCK_GAP, 2 * DOCK_BUTTON + DOCK_GAP)
+	local grid = Instance.new("UIGridLayout")
+	grid.CellSize = UDim2.fromOffset(DOCK_BUTTON, DOCK_BUTTON)
+	grid.CellPadding = UDim2.fromOffset(DOCK_GAP, DOCK_GAP)
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.Parent = dock
+else
+	dock.AnchorPoint = Vector2.new(0.5, 1)
+	dock.Position = UDim2.new(0.5, 0, 1, -DOCK_BOTTOM)
+	dock.Size = UDim2.fromOffset(#TABS * DOCK_BUTTON + (#TABS - 1) * DOCK_GAP, DOCK_BUTTON)
+	local row = Instance.new("UIListLayout")
+	row.FillDirection = Enum.FillDirection.Horizontal
+	row.Padding = UDim.new(0, DOCK_GAP)
+	row.SortOrder = Enum.SortOrder.LayoutOrder
+	row.Parent = dock
+end
 
 local dockButtons: { [Tab]: TextButton } = {}
 for index, tab: Tab in TABS do
@@ -278,8 +296,13 @@ for index, tab: Tab in TABS do
 end
 
 local wallet = UiTheme.panel(gui, "Wallet", UDim.new(0.5, 0))
-wallet.AnchorPoint = Vector2.new(0.5, 1)
-wallet.Position = UDim2.new(0.5, 0, 1, -(DOCK_BOTTOM + DOCK_BUTTON + 12))
+if touchOnly then
+	wallet.AnchorPoint = Vector2.new(1, 1)
+	wallet.Position = UDim2.new(1, -184, 1, -(28 + 2 * DOCK_BUTTON + DOCK_GAP + 10))
+else
+	wallet.AnchorPoint = Vector2.new(0.5, 1)
+	wallet.Position = UDim2.new(0.5, 0, 1, -(DOCK_BOTTOM + DOCK_BUTTON + 12))
+end
 wallet.AutomaticSize = Enum.AutomaticSize.X
 wallet.Size = UDim2.fromOffset(0, 30)
 wallet.Visible = false
@@ -295,8 +318,8 @@ walletText.Size = UDim2.fromScale(0, 1)
 
 local holder = Instance.new("Frame")
 holder.Name = "LobbyPanel"
-holder.AnchorPoint = Vector2.new(0.5, 0.5)
-holder.Position = UDim2.new(0.5, 0, 0.5, 30) -- a little low: clear of the phase pill at the top
+holder.AnchorPoint = Vector2.new(0.5, 0) -- top-anchored: fitToScreen places the top edge
+holder.Position = UDim2.new(0.5, 0, 0, 62)
 holder.Size = UDim2.fromOffset(PANEL_WIDTH, PANEL_HEIGHT)
 holder.BackgroundTransparency = 1
 holder.Visible = false
@@ -308,9 +331,13 @@ local function fitToScreen()
 	local camera = Workspace.CurrentCamera
 	if camera then
 		local viewport = camera.ViewportSize
-		-- Leave room for Roblox's top bar and the phase pill; never below 60%.
-		fitScale.Scale =
-			math.clamp(math.min((viewport.Y - 110) / PANEL_HEIGHT, viewport.X * 0.94 / PANEL_WIDTH), 0.6, 1)
+		-- As big as fits below Roblox's top bar (the dock hides while the panel is open, so
+		-- the bottom of the screen is free); never below 60%. On short phone screens it covers
+		-- the phase pill while open, which keeps text ~10 px and buttons tappable.
+		local scale = math.clamp(math.min((viewport.Y - 72) / PANEL_HEIGHT, viewport.X * 0.94 / PANEL_WIDTH), 0.6, 1)
+		fitScale.Scale = scale
+		local top = math.max(62, (viewport.Y - PANEL_HEIGHT * scale) / 2 + 15)
+		holder.Position = UDim2.new(0.5, 0, 0, top)
 	end
 end
 local function watchCamera()
@@ -326,6 +353,7 @@ watchCamera()
 local panel = UiTheme.panel(holder, "Panel", UDim.new(0, 16))
 panel.Size = UDim2.fromScale(1, 1)
 panel.BackgroundTransparency = 0.08
+panel.Active = true -- sink drags and the wheel, so the camera / thumbstick don't move underneath
 
 -- Header: tab pills, wallet, close.
 local tabButtons: { [Tab]: TextButton } = {}
@@ -333,8 +361,8 @@ for index, tab: Tab in TABS do
 	local button = Instance.new("TextButton")
 	button.Name = TAB_LABEL[tab]
 	button.AutoButtonColor = false
-	button.Position = UDim2.fromOffset(16 + (index - 1) * 94, 12)
-	button.Size = UDim2.fromOffset(88, 32)
+	button.Position = UDim2.fromOffset(16 + (index - 1) * 86, 12)
+	button.Size = UDim2.fromOffset(80, 32)
 	button.BorderSizePixel = 0
 	button.Font = UiTheme.FontHeavy
 	button.TextSize = 14
@@ -344,16 +372,21 @@ for index, tab: Tab in TABS do
 	tabButtons[tab] = button
 end
 
-local headerWallet =
-	label(panel, UiTheme.Font, COLORS.Text, 14, UDim2.fromOffset(PANEL_WIDTH - 236, 12), UDim2.fromOffset(176, 32))
+-- Between the tab pills (ending at x 354) and the close button (from x 552).
+local headerWallet = label(panel, UiTheme.Font, COLORS.Text, 14, UDim2.fromOffset(362, 12), UDim2.fromOffset(184, 32))
 headerWallet.TextXAlignment = Enum.TextXAlignment.Right
+headerWallet.TextScaled = true -- big balances shrink instead of running into the tabs
+local walletLimit = Instance.new("UITextSizeConstraint")
+walletLimit.MaxTextSize = 14
+walletLimit.MinTextSize = 9
+walletLimit.Parent = headerWallet
 
 local closeButton = Instance.new("TextButton")
 closeButton.Name = "Close"
 closeButton.AutoButtonColor = false
 closeButton.AnchorPoint = Vector2.new(1, 0)
-closeButton.Position = UDim2.new(1, -12, 0, 12)
-closeButton.Size = UDim2.fromOffset(32, 32)
+closeButton.Position = UDim2.new(1, -12, 0, 10)
+closeButton.Size = UDim2.fromOffset(36, 36)
 closeButton.BackgroundColor3 = COLORS.Panel
 closeButton.BackgroundTransparency = 0.3
 closeButton.Font = UiTheme.FontHeavy
@@ -536,7 +569,7 @@ do
 
 	for index, style in ordered do
 		local color = AbilityData.RarityColors[style.rarity]
-		local frame = card(styleList, style.id, UDim2.new(1, -8, 0, 78))
+		local frame = card(styleList, style.id, UDim2.new(1, -8, 0, 88))
 		frame.LayoutOrder = index
 
 		local stripe = Instance.new("Frame")
@@ -555,9 +588,10 @@ do
 		label(frame, UiTheme.Font, color, 12, UDim2.fromOffset(18, 30), UDim2.fromOffset(380, 16)).Text =
 			`{string.upper(style.rarity)} · {uses}`
 		local blurb =
-			label(frame, UiTheme.FontBody, COLORS.SubText, 13, UDim2.fromOffset(18, 48), UDim2.fromOffset(400, 22))
+			label(frame, UiTheme.FontBody, COLORS.SubText, 13, UDim2.fromOffset(18, 48), UDim2.fromOffset(400, 34))
 		blurb.Text = style.description
-		blurb.TextTruncate = Enum.TextTruncate.AtEnd
+		blurb.TextWrapped = true -- two lines fit
+		blurb.TextYAlignment = Enum.TextYAlignment.Top
 
 		local button = pillButton(frame, "EQUIP", COLORS.Skill, UDim2.fromOffset(110, 36))
 		button.AnchorPoint = Vector2.new(1, 0.5)
@@ -671,13 +705,14 @@ reel.BackgroundTransparency = 0.04
 reel.BorderSizePixel = 0
 reel.Visible = false
 reel.ZIndex = 5
+reel.Active = true -- sinks taps, so nothing reaches SPIN / BUY KEY hidden underneath
 reel.Parent = cratePage
 UiTheme.corner(reel, UDim.new(0, 12))
 
 local reelWindow = Instance.new("Frame")
 reelWindow.AnchorPoint = Vector2.new(0.5, 0)
 reelWindow.Position = UDim2.new(0.5, 0, 0, 40)
-reelWindow.Size = UDim2.fromOffset(REEL_WINDOW, REEL_CARD + 16)
+reelWindow.Size = UDim2.fromOffset(REEL_WINDOW, REEL_CARD + 24)
 reelWindow.BackgroundTransparency = 0.6
 reelWindow.BackgroundColor3 = Color3.new(0, 0, 0)
 reelWindow.ClipsDescendants = true
@@ -696,7 +731,8 @@ strip.Parent = reelWindow
 local reelCards: { { frame: Frame, stroke: UIStroke, name: TextLabel, rarity: TextLabel, pop: UIScale } } = {}
 for index = 1, REEL_LENGTH do
 	local frame = Instance.new("Frame")
-	frame.Position = UDim2.fromOffset((index - 1) * (REEL_CARD + REEL_GAP), 0)
+	frame.AnchorPoint = Vector2.new(0.5, 0.5) -- the winner's pop grows from its centre
+	frame.Position = UDim2.fromOffset((index - 1) * (REEL_CARD + REEL_GAP) + REEL_CARD / 2, REEL_CARD / 2)
 	frame.Size = UDim2.fromOffset(REEL_CARD, REEL_CARD)
 	frame.BackgroundColor3 = COLORS.Panel
 	frame.BorderSizePixel = 0
@@ -734,7 +770,7 @@ reelResult.Size = UDim2.fromOffset(CONTENT_WIDTH - 32, 52)
 reelResult.TextWrapped = true
 reelResult.ZIndex = 6
 
-local reelDone = pillButton(reel, "NICE", COLORS.UltA, UDim2.fromOffset(140, 36))
+local reelDone = pillButton(reel, "OK", COLORS.UltA, UDim2.fromOffset(140, 36))
 reelDone.AnchorPoint = Vector2.new(0.5, 0)
 reelDone.Position = UDim2.new(0.5, 0, 0, 240)
 reelDone.ZIndex = 6
@@ -745,6 +781,14 @@ reelDone.Activated:Connect(function()
 		refresh()
 	end
 end)
+
+-- A brand-new style can be equipped right from the reveal.
+local reelEquip = pillButton(reel, "EQUIP NOW", COLORS.Skill, UDim2.fromOffset(160, 36))
+reelEquip.AnchorPoint = Vector2.new(0.5, 0)
+reelEquip.Position = UDim2.new(0.5, 86, 0, 240)
+reelEquip.ZIndex = 6
+reelEquip.Visible = false
+local reelStyleId: string? = nil
 
 local function weightedPick(rng: Random): AbilityData.LegStyle
 	local list, total = crateTable()
@@ -773,6 +817,8 @@ local function playReel(style: AbilityData.LegStyle, duplicate: boolean)
 	spinning = true
 	reel.Visible = true
 	reelDone.Visible = false
+	reelEquip.Visible = false
+	reelStyleId = if duplicate then nil else style.id
 	reelResult.Text = ""
 	local rng = Random.new()
 	for index = 1, REEL_LENGTH do
@@ -797,9 +843,13 @@ local function playReel(style: AbilityData.LegStyle, duplicate: boolean)
 		reelResult.Text = if duplicate
 			then `{string.upper(style.displayName)} (already owned)\n+{Config.Monetization.DuplicateRefundCoins} coins`
 			else `NEW · {string.upper(style.displayName)}\n{string.upper(style.rarity)}`
-		reelDone.Text = if duplicate then "OK" else "NICE"
+		-- One button for a duplicate; OK + EQUIP NOW side by side for a new style.
+		reelDone.Position = if duplicate then UDim2.new(0.5, 0, 0, 240) else UDim2.new(0.5, -86, 0, 240)
 		reelDone.Visible = true
+		reelEquip.Visible = not duplicate
+		setStatus(if duplicate then "Duplicate: coins refunded" else `New Leg Style: {style.displayName}`, COLORS.UltA)
 		spinning = false
+		frozenWallet = nil -- the reveal is done: show the real balance
 		refresh()
 	end)
 	tween:Play()
@@ -807,7 +857,7 @@ end
 
 spinButton.Activated:Connect(function()
 	local snapshot = profile
-	if snapshot == nil or busy or spinning then
+	if snapshot == nil or busy or spinning or reel.Visible then
 		return
 	end
 	if snapshot.crateKeys <= 0 then
@@ -818,6 +868,9 @@ spinButton.Activated:Connect(function()
 		return
 	end
 	busy = true
+	-- Hold the wallet line as it was: the profile push for this spin (one key fewer,
+	-- maybe a duplicate refund) would otherwise give the result away before the reel lands.
+	frozenWallet = headerWallet.Text
 	refresh()
 	local ok, success, result, duplicate = pcall(function()
 		return remotes.SpinCrate:InvokeServer()
@@ -825,19 +878,28 @@ spinButton.Activated:Connect(function()
 	busy = false
 	local style = if ok and success == true and typeof(result) == "string" then AbilityData.get(result) else nil
 	if style == nil then
+		frozenWallet = nil
 		setStatus(if ok and typeof(result) == "string" then result else "Couldn't spin. Try again.", COLORS.Danger)
 		refresh()
 		return
 	end
-	setStatus(
-		if duplicate == true then "Duplicate: coins refunded" else `New Leg Style: {style.displayName}`,
-		COLORS.UltA
-	)
+	setStatus("Spinning...", COLORS.SubText)
 	playReel(style, duplicate == true)
 end)
 
+reelEquip.Activated:Connect(function()
+	local styleId = reelStyleId
+	if styleId == nil or busy or spinning then
+		return
+	end
+	reel.Visible = false
+	request(function(): (boolean, string)
+		return answer(remotes.EquipLegStyle:InvokeServer(styleId))
+	end)
+end)
+
 buyKeyButton.Activated:Connect(function()
-	if busy or spinning then
+	if busy or spinning or reel.Visible then
 		return
 	end
 	if coins() < keyPrice then
@@ -850,7 +912,7 @@ buyKeyButton.Activated:Connect(function()
 end)
 
 robuxButton.Activated:Connect(function()
-	if productId ~= 0 then
+	if productId ~= 0 and not reel.Visible then
 		MarketplaceService:PromptProductPurchase(localPlayer, productId)
 	end
 end)
@@ -861,6 +923,11 @@ local function refreshCrate()
 	keysText.Text = `{keys} KEY{if keys == 1 then "" else "S"}`
 	setButton(spinButton, if spinning then "SPINNING..." else "SPIN", keys > 0 and not busy and not spinning)
 	setButton(buyKeyButton, `BUY KEY · {commas(keyPrice)}`, coins() >= keyPrice and not busy and not spinning)
+	-- Under the reel these can't be tapped (it sinks input) or reached with a gamepad.
+	local covered = reel.Visible
+	spinButton.Interactable = not covered
+	buyKeyButton.Interactable = not covered
+	robuxButton.Interactable = not covered
 end
 
 -- BET --------------------------------------------------------------------------------------
@@ -904,7 +971,7 @@ do
 	table.insert(values, nil) -- MAX
 	for index = 1, #BET_CHIPS + 1 do
 		local value = values[index]
-		local chip = pillButton(betBar, if value then tostring(value) else "MAX", COLORS.Dash, UDim2.fromOffset(62, 30))
+		local chip = pillButton(betBar, if value then tostring(value) else "MAX", COLORS.Dash, UDim2.fromOffset(62, 34))
 		chip.Position = UDim2.fromOffset((index - 1) * 68, 0)
 		chip.Activated:Connect(function()
 			betChoice = value
@@ -915,7 +982,7 @@ do
 end
 
 local payoutText =
-	label(betBar, UiTheme.FontHeavy, COLORS.Text, 15, UDim2.fromOffset(350, 0), UDim2.fromOffset(218, 30))
+	label(betBar, UiTheme.FontHeavy, COLORS.Text, 15, UDim2.fromOffset(350, 0), UDim2.fromOffset(218, 34))
 payoutText.TextXAlignment = Enum.TextXAlignment.Right
 
 local placeButton = pillButton(betBar, "PLACE BET", COLORS.Dash, UDim2.fromOffset(200, 34))
@@ -1061,7 +1128,8 @@ local function refreshBet()
 		bet = nil
 	end
 	local fighters = aliveFighters()
-	local open = phase == "Active" and #fighters > 2 and not isTrue(ATTR.InArena)
+	-- The server takes bets from the moment the round's fighters are in (Spawning) until the Final Duel.
+	local open = (phase == "Spawning" or phase == "Active") and #fighters > 2 and not isTrue(ATTR.InArena)
 
 	betSummary.Visible = bet ~= nil
 	betList.Visible = bet == nil and open
@@ -1072,12 +1140,27 @@ local function refreshBet()
 		local payout = math.floor(bet.amount * bet.multiplier)
 		summaryAvatar.Image = headshot(bet.targetId)
 		summaryTitle.Text = `YOUR BET: {string.upper(bet.targetName)}`
-		summaryDetail.Text =
-			string.format("%s coins at x%.1f · pays %s", commas(bet.amount), bet.multiplier, commas(payout))
-		local target = Players:GetPlayerByUserId(bet.targetId)
-		summaryNote.Text = if target and target:GetAttribute(ATTR.InArena) == true
-			then "Still fighting. Settled when the round ends."
-			else "Out of the round. Settled when the round ends."
+		local outcome = bet.outcome
+		local inProgress = phase == "Spawning" or phase == "Active" or phase == "FinalDuel"
+		if outcome then
+			summaryDetail.Text = if outcome.result == "Won"
+				then `WON +{commas(outcome.coins)} COINS`
+				elseif outcome.result == "Refunded" then `REFUNDED {commas(outcome.coins)} COINS`
+				else `LOST {commas(bet.amount)} COINS`
+			summaryDetail.TextColor3 = if outcome.result == "Lost" then COLORS.Danger else COLORS.Dash
+			summaryNote.Text = "Settled. Bets open again when the next round starts."
+		else
+			summaryDetail.Text =
+				string.format("%s coins at x%.1f · pays %s", commas(bet.amount), bet.multiplier, commas(payout))
+			summaryDetail.TextColor3 = COLORS.Dash
+			local target = Players:GetPlayerByUserId(bet.targetId)
+			summaryNote.Text = if not inProgress
+				then "Round over: settling your bet..."
+				elseif
+					target and target:GetAttribute(ATTR.InArena) == true
+				then "Still fighting. Settled when the round ends."
+				else "Out of the round. Settled when the round ends."
+		end
 		return
 	end
 
@@ -1134,10 +1217,14 @@ function refresh()
 	local snapshot = profile
 	local inArena = isTrue(ATTR.InArena)
 	local tab = activeTab
-	local walletLine = if snapshot
-		then `{commas(snapshot.coins)} COINS  ·  {snapshot.crateKeys} KEY{if snapshot.crateKeys == 1 then "" else "S"}`
-		else "LOADING..."
-	walletText.Text = walletLine
+	local walletLine = frozenWallet
+		or if snapshot
+			then `{commas(snapshot.coins)} COINS  ·  {snapshot.crateKeys} KEY{if snapshot.crateKeys == 1
+				then ""
+				else "S"}`
+			else "LOADING..."
+	local gamepad = string.match(UserInputService:GetLastInputType().Name, "^Gamepad") ~= nil
+	walletText.Text = if gamepad then `{walletLine}  ·  D-PAD UP: LOBBY` else walletLine
 	headerWallet.Text = walletLine
 
 	dock.Visible = not inArena and tab == nil
@@ -1164,16 +1251,24 @@ function refresh()
 	end
 end
 
+local function usingGamepad(): boolean
+	return string.match(UserInputService:GetLastInputType().Name, "^Gamepad") ~= nil
+end
+
 local function openTab(tab: Tab)
-	if isTrue(ATTR.InArena) then
-		return
+	if isTrue(ATTR.InArena) or (spinning and tab ~= activeTab) then
+		return -- (mid-spin: stay on the reel; the other tabs would show the result early)
 	end
 	if activeTab == nil then
 		setStatus("")
 		holder.Visible = true
 	end
 	activeTab = tab
+	lastTab = tab
 	refresh()
+	if usingGamepad() then
+		GuiService.SelectedObject = tabButtons[tab] -- start gamepad navigation inside the panel
+	end
 end
 
 local function closePanel()
@@ -1182,6 +1277,10 @@ local function closePanel()
 	end
 	activeTab = nil
 	reel.Visible = false
+	local selected = GuiService.SelectedObject
+	if selected and selected:IsDescendantOf(gui) then
+		GuiService.SelectedObject = nil
+	end
 	refresh()
 end
 
@@ -1195,19 +1294,41 @@ for _, tab: Tab in TABS do
 end
 closeButton.Activated:Connect(closePanel)
 
--- Gamepad B closes the panel (in the lobby B isn't DASH).
+-- Gamepad: D-pad up opens the lobby, L1 / R1 switch tabs, B closes. (Out of the arena
+-- none of these are combat inputs.)
 UserInputService.InputBegan:Connect(function(input: InputObject)
-	if input.KeyCode == Enum.KeyCode.ButtonB and activeTab ~= nil and not isTrue(ATTR.InArena) then
-		closePanel()
+	if isTrue(ATTR.InArena) then
+		return
 	end
+	local key = input.KeyCode
+	local tab = activeTab
+	if tab == nil then
+		if key == Enum.KeyCode.DPadUp then
+			openTab(lastTab)
+		end
+	elseif key == Enum.KeyCode.ButtonB then
+		closePanel()
+	elseif key == Enum.KeyCode.ButtonL1 or key == Enum.KeyCode.ButtonR1 then
+		local index = table.find(TABS, tab) or 1
+		local step = if key == Enum.KeyCode.ButtonR1 then 1 else -1
+		openTab(TABS[(index - 1 + step) % #TABS + 1])
+	end
+end)
+UserInputService.LastInputTypeChanged:Connect(function()
+	refresh() -- the dock's gamepad hint
 end)
 
 -- Going into the arena closes everything (the combat HUD takes over).
 localPlayer:GetAttributeChangedSignal(ATTR.InArena):Connect(function()
 	if isTrue(ATTR.InArena) then
 		spinning = false -- the reel's result is already in the profile
+		frozenWallet = nil
 		activeTab = nil
 		reel.Visible = false
+		local selected = GuiService.SelectedObject
+		if selected and selected:IsDescendantOf(gui) then
+			GuiService.SelectedObject = nil
+		end
 	end
 	refresh()
 end)
@@ -1215,16 +1336,22 @@ end)
 roundState:GetAttributeChangedSignal(STATE.Phase):Connect(refresh)
 
 -- Profile: one request at start (the server may still be loading it), then pushes.
-remotes.ProfileUpdated.OnClientEvent:Connect(function(snapshot: Types.ProfileSnapshot, notice: string?)
-	profile = snapshot
-	if notice then
-		CombatFX.toast(string.upper(notice), COLORS.UltA)
-		if activeTab then
-			setStatus(notice, COLORS.UltA)
+remotes.ProfileUpdated.OnClientEvent:Connect(
+	function(snapshot: Types.ProfileSnapshot, notice: string?, outcome: Types.BetOutcome?)
+		profile = snapshot
+		local bet = myBet
+		if outcome and bet and bet.targetId == outcome.targetId then
+			bet.outcome = outcome -- the BET tab's summary now shows how it ended
 		end
+		if notice then
+			CombatFX.toast(string.upper(notice), COLORS.UltA)
+			if activeTab then
+				setStatus(notice, COLORS.UltA)
+			end
+		end
+		refresh()
 	end
-	refresh()
-end)
+)
 
 task.spawn(function()
 	for _ = 1, 15 do

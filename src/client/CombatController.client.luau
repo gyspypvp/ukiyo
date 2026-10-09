@@ -684,7 +684,7 @@ local function requestSkill()
 	end
 	local style, usesLeft = skillUsesLeft()
 	if style == nil or style.usesPerRound <= 0 then
-		CombatFX.toast("NO LEG STYLE: EQUIP ONE IN THE LOBBY", COLORS.SubText)
+		CombatFX.toast("NO LEG STYLE YET: OPEN A CRATE IN THE LOBBY", COLORS.SubText)
 	elseif usesLeft <= 0 then
 		CombatFX.toast("SKILL USED UP THIS ROUND", COLORS.SubText)
 	elseif not isTrue(ATTR.Flying) then

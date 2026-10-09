@@ -44,7 +44,7 @@ export type Remotes = {
 	Effect: RemoteEvent, -- (Types.EffectPayload), all clients
 	Ultimate: RemoteEvent, -- (Types.UltimatePayload), all clients: leap / dive / miss / cancel
 	RoundEvent: RemoteEvent, -- (Types.RoundEventPayload), all clients
-	ProfileUpdated: RemoteEvent, -- (Types.ProfileSnapshot, notice: string?), owner only, on every profile change
+	ProfileUpdated: RemoteEvent, -- (Types.ProfileSnapshot, notice: string?, bet: Types.BetOutcome?), owner only, on every change
 
 	-- Lobby request/response (RemoteFunction, Client -> Server ONLY)
 	GetProfile: RemoteFunction, -- () -> Types.ProfileSnapshot?

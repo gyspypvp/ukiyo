@@ -48,7 +48,7 @@ StarterPlayer
         └── LobbyController   LocalScript    lobby dock + panel: SHOP / STYLES / CRATE / BET, wallet
 ```
 
-Only two kinds of top-level code run: one server `Script` (`Main`) and two client `LocalScript`s. Everything else is a ModuleScript with an explicit `init`, so the start-up order is visible in one file.
+Only two kinds of top-level code run: one server `Script` (`Main`) and three client `LocalScript`s (`CombatController`, `RoundController`, `LobbyController`). Everything else is a ModuleScript with an explicit `init`, so the start-up order is visible in one file.
 
 ## Who owns what
 
@@ -94,10 +94,11 @@ No changes to CombatService, RoundManager, the client or the network layer.
 ```
 Waiting ─▶ Intermission (15 s) ─▶ Spawning ─▶ Active ─▶ FinalDuel ─▶ MatchEnd ─▶ Intermission …
               lobby: upgrade,      teleport +   mode.     2 alive:     payout, bets,
-              spin crates, bet     register     onTick    FOV + music  back to lobby
+              spin crates          register     onTick    FOV + music  back to lobby
 ```
 
 - **Spawning:** up to 15 eligible players are shuffled onto arena spawns, then `CombatService.registerCombatant` gives each a LinearVelocity rig (disabled) and the `CK_Characters` collision group.
+- **Betting:** opens once the round's fighters are registered (Spawning) for anyone not fighting, and closes at the Final Duel; bets are settled at MatchEnd (refunded on a timeout, draw, no contest or a crashed round).
 - **Active:** kicking unlocks (`canLaunch` is false during Spawning). `mode:onRoundStart` runs, then the RoundManager ticks `mode:getResult` / `isFinalPhase` / `onTick` every 0.1 s.
 - **Strike survived:** +1 strike, victim knocked out of whatever they were doing (their kick or ULTIMATE), tumbles for 0.7 s (server-owned physics), attacker paid `CoinsPerHit`, mode `onStruck`.
 - **KO (exploded, knocked off, died, left):** CombatService fires `Defeated` → the mode calls `ctx.eliminate(victim, killer, cause)` → combatant unregistered, killer paid. On an explosion every client plays the blast and hides the body, the finishing kicker lands past it with their back turned, and the victim gets a kill-cam on the killer → teleported to the lobby after 1.25 s to spectate and bet.

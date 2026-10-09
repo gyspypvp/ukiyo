@@ -52,7 +52,8 @@ local PlayerDataService = {}
 
 local profiles: { [Player]: Profile } = {}
 local remotes: Net.Remotes? = nil
-local pendingPush: { [Player]: { notice: string? } } = {} -- coalesces pushes to one per frame
+type PendingPush = { notice: string?, bet: Types.BetOutcome? }
+local pendingPush: { [Player]: PendingPush } = {} -- coalesces pushes to one per frame
 local lobbyLimiter = RateLimiter.new(Config.RateLimits.Lobby.rate, Config.RateLimits.Lobby.burst)
 local rng = Random.new()
 
@@ -237,30 +238,32 @@ end
 	pays coins, a bet settles), so pushes are coalesced: the first change in a
 	frame schedules one deferred send, and the latest notice wins.
 ]]
-local function pushProfile(player: Player, notice: string?)
+local function pushProfile(player: Player, notice: string?, bet: Types.BetOutcome?)
 	local pending = pendingPush[player]
 	if pending then
 		pending.notice = notice or pending.notice
+		pending.bet = bet or pending.bet
 		return
 	end
-	pendingPush[player] = { notice = notice }
+	pendingPush[player] = { notice = notice, bet = bet }
 	task.defer(function()
 		local entry = pendingPush[player]
 		pendingPush[player] = nil
 		local profile = profiles[player]
 		local net = remotes
 		if entry and profile and net and player.Parent then
-			net.ProfileUpdated:FireClient(player, snapshot(profile), entry.notice)
+			net.ProfileUpdated:FireClient(player, snapshot(profile), entry.notice, entry.bet)
 		end
 	end)
 end
 
 -- Public API -------------------------------------------------------------------
 
--- Tell the owner something about their coins (e.g. "Your bet won +240"); also refreshes their snapshot.
-function PlayerDataService.notify(player: Player, notice: string)
+-- Tell the owner something about their coins (e.g. "Your bet won +240"); also refreshes their
+-- snapshot. `bet` carries a settled bet's outcome for the lobby's bet summary.
+function PlayerDataService.notify(player: Player, notice: string, bet: Types.BetOutcome?)
 	if profiles[player] then
-		pushProfile(player, notice)
+		pushProfile(player, notice, bet)
 	end
 end
 
@@ -384,6 +387,11 @@ local function equipStyle(player: Player, rawStyleId: unknown): (boolean, string
 	local styleId = Guard.shortString(rawStyleId, 32)
 	if profile == nil or styleId == nil or not profile.OwnedStyles[styleId] then
 		return false, "You don't own that style"
+	end
+	-- Uses per round are counted against whatever is equipped, so swapping mid-round
+	-- would let one round stack two styles' activations. Change styles in the lobby.
+	if player:GetAttribute(Net.Attributes.InArena) == true then
+		return false, "Change styles between rounds"
 	end
 	profile.EquippedStyle = styleId
 	player:SetAttribute(Net.Attributes.LegStyle, styleId)

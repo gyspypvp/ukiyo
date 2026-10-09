@@ -297,7 +297,11 @@ local function finishRound(round: Round, ctx: RoundContext, result: RoundResult)
 	end
 	-- A timeout is decided by visible strikes, so a last-second bet on the leader would be
 	-- free money: refund every bet on a timeout, pay out only real last-standing wins.
-	BettingService.settle(if #winners == 1 and result.reason ~= "Timeout" then winners[1] else nil)
+	local paid = #winners == 1 and result.reason ~= "Timeout"
+	BettingService.settle(
+		if paid then winners[1] else nil,
+		if result.reason == "Timeout" then "Time ran out" elseif #winners > 1 then "It ended in a draw" else "No contest"
+	)
 
 	local payload: Types.RoundEventPayload
 	if #winners == 1 then
@@ -482,6 +486,8 @@ function RoundManager.start()
 			if not ok then
 				CombatService.setRules(nil)
 				CombatService.reset()
+				-- Refund the crashed round's bets and close betting on it.
+				pcall(BettingService.settle, nil, "The round was interrupted")
 				currentRound = nil
 				currentContext = nil
 				task.wait(3)

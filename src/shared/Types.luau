@@ -93,6 +93,13 @@ export type ProfileSnapshot = {
 	kills: number,
 }
 
+-- How a bet ended (sent with the settle notice, so the lobby's bet summary can show it).
+export type BetOutcome = {
+	result: "Won" | "Lost" | "Refunded",
+	coins: number, -- paid out (Won) or returned (Refunded); 0 when Lost
+	targetId: number,
+}
+
 export type RoundEventKind = "Winner" | "Draw" | "Eliminated" | "NoContest"
 
 -- Why a fighter went down. The GameMode decides what each cause means.

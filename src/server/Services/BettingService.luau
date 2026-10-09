@@ -14,18 +14,23 @@
 
 	With nobody struck yet that is aliveAtBet * BetHouseEdge: an early bet on a
 	crowded arena pays a lot. An untouched favourite pays less, and an
-	underdog's payout never exceeds the crowded-arena maximum. Every bettor is
-	told how their bet ended (PlayerDataService.notify).
+	underdog's payout never exceeds the crowded-arena maximum. Every bettor
+	still in the server is told how their bet ended (PlayerDataService.notify).
+	Bets are keyed by UserId, so a bettor who drops and rejoins mid-round is
+	still settled (and can't bet twice).
 	Betting closes at the Final Duel (2 alive) so nobody can farm near-certain
 	outcomes. Coins are taken up front; a round with no single winner refunds.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Players = game:GetService("Players")
+
 local Shared = ReplicatedStorage.Shared
 local CombatMath = require(Shared.CombatMath)
 local Config = require(Shared.Config)
 local Net = require(Shared.Net)
+local Types = require(Shared.Types)
 
 local Guard = require(script.Parent.Parent.Util.Guard)
 local RateLimiter = require(script.Parent.Parent.Util.RateLimiter)
@@ -40,7 +45,7 @@ type Bet = {
 
 local BettingService = {}
 
-local bets: { [Player]: Bet } = {}
+local bets: { [number]: Bet } = {} -- by bettor UserId
 local isOpen = false
 local isAliveFn: ((Player) -> boolean)? = nil
 local getAliveFn: (() -> { Player })? = nil
@@ -54,7 +59,7 @@ local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown
 	if isAlive(player) then
 		return false, "You're still fighting!"
 	end
-	if bets[player] then
+	if bets[player.UserId] then
 		return false, "You already placed a bet this round"
 	end
 	local target = Guard.player(rawTargetId)
@@ -88,7 +93,7 @@ local function placeBet(player: Player, rawTargetId: unknown, rawAmount: unknown
 	local rewards = Config.Rewards
 	local multiplier =
 		CombatMath.betMultiplier(totalLeft, kicksLeft(target), alive, rewards.BetHouseEdge, rewards.MinBetMultiplier)
-	bets[player] = {
+	bets[player.UserId] = {
 		targetId = target.UserId,
 		targetName = target.DisplayName,
 		amount = amount,
@@ -105,22 +110,35 @@ function BettingService.openRound(isAlive: (Player) -> boolean, getAlive: () -> 
 	isOpen = true
 end
 
--- Pays correct bets. `winner == nil` (timeout / no contest) refunds every bet.
-function BettingService.settle(winner: Player?)
+--[[
+	Pays correct bets. `winner == nil` refunds every bet; `refundReason` says why
+	("Time ran out", "It ended in a draw", ...). Bettors who left the server are
+	skipped: their profile is already saved and released.
+]]
+function BettingService.settle(winner: Player?, refundReason: string?)
 	isOpen = false
-	for bettor, bet in bets do
-		if bettor.Parent == nil then
+	for bettorId, bet in bets do
+		local bettor = Players:GetPlayerByUserId(bettorId)
+		if bettor == nil or not PlayerDataService.isLoaded(bettor) then
 			continue
 		end
+		local outcome: Types.BetOutcome
 		if winner == nil then
 			PlayerDataService.addCoins(bettor, bet.amount)
-			PlayerDataService.notify(bettor, `No single winner: your {bet.amount} coins are refunded`)
+			outcome = { result = "Refunded", coins = bet.amount, targetId = bet.targetId }
+			PlayerDataService.notify(
+				bettor,
+				`{refundReason or "No winner"}: your {bet.amount} coins are refunded`,
+				outcome
+			)
 		elseif bet.targetId == winner.UserId then
 			local payout = math.floor(bet.amount * bet.multiplier)
 			PlayerDataService.addCoins(bettor, payout)
-			PlayerDataService.notify(bettor, `Your bet on {bet.targetName} won: +{payout} coins`)
+			outcome = { result = "Won", coins = payout, targetId = bet.targetId }
+			PlayerDataService.notify(bettor, `Your bet on {bet.targetName} won: +{payout} coins`, outcome)
 		else
-			PlayerDataService.notify(bettor, `Your bet on {bet.targetName} lost`)
+			outcome = { result = "Lost", coins = 0, targetId = bet.targetId }
+			PlayerDataService.notify(bettor, `Your bet on {bet.targetName} lost`, outcome)
 		end
 	end
 	table.clear(bets)
